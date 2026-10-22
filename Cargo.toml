@@ -1,0 +1,36 @@
+[package]
+name = "meta-whatsapp"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.89"
+license = "Apache-2.0 OR MIT"
+description = "Typed client and webhook toolkit for the WhatsApp Cloud API (Meta Graph API)"
+repository = "https://github.com/floffel/meta-whatsapp"
+documentation = "https://docs.rs/meta-whatsapp"
+keywords = ["whatsapp", "meta", "cloud-api", "webhook", "graph-api"]
+categories = ["api-bindings", "web-programming"]
+readme = "README.md"
+
+[features]
+default = ["http"]
+http = ["dep:reqwest"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+hmac = "0.12"
+sha2 = "0.10"
+hex = "0.4"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "deny"
+
+[lints.clippy]
+all = "warn"
+pedantic = "warn"
