@@ -113,3 +113,13 @@ async fn transport_errors_are_propagated() {
     let err = client.send_text("2", "x").await.unwrap_err();
     assert!(matches!(err, meta_whatsapp::Error::Transport(_)));
 }
+
+#[test]
+fn debug_does_not_leak_the_token() {
+    let client = WhatsAppClient::new("1", "EAAG-super-secret", RecordingTransport::new(json!({})));
+    let rendered = format!("{client:?}");
+    assert!(
+        !rendered.contains("EAAG-super-secret"),
+        "token im Debug: {rendered}"
+    );
+}

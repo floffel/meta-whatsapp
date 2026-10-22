@@ -12,7 +12,7 @@
 //! ```
 //! use meta_whatsapp::WebhookVerifier;
 //!
-//! let verifier = WebhookVerifier::new("app-secret");
+//! let verifier = WebhookVerifier::new("app-secret")?;
 //! let body = br#"{"object":"whatsapp_business_account","entry":[]}"#;
 //! let header = verifier.sign(body);
 //! let payload = verifier.verify_and_parse(body, &header)?;

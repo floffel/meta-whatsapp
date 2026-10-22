@@ -15,11 +15,12 @@ type HmacSha256 = Hmac<Sha256>;
 /// ```
 /// use meta_whatsapp::WebhookVerifier;
 ///
-/// let verifier = WebhookVerifier::new(b"app-secret");
+/// let verifier = WebhookVerifier::new(b"app-secret")?;
 /// let body = br#"{"object":"whatsapp_business_account","entry":[]}"#;
 /// // In production this comes from the request header.
 /// let header = verifier.sign(body);
 /// assert!(verifier.verify(body, &header).is_ok());
+/// # Ok::<(), meta_whatsapp::Error>(())
 /// ```
 #[derive(Clone)]
 pub struct WebhookVerifier {
@@ -35,11 +36,17 @@ impl std::fmt::Debug for WebhookVerifier {
 
 impl WebhookVerifier {
     /// Creates a verifier for the given Meta app secret.
-    #[must_use]
-    pub fn new(secret: impl Into<Vec<u8>>) -> Self {
-        Self {
-            secret: secret.into(),
+    ///
+    /// # Errors
+    ///
+    /// Rejects an empty secret: HMAC with an empty key is well defined, so a
+    /// missing environment variable would silently accept every request.
+    pub fn new(secret: impl Into<Vec<u8>>) -> Result<Self> {
+        let secret = secret.into();
+        if secret.is_empty() {
+            return Err(Error::EmptySecret);
         }
+        Ok(Self { secret })
     }
 
     /// Computes the header value for `body` — handy for tests and fixtures.

@@ -5,6 +5,10 @@ use thiserror::Error;
 /// Everything that can go wrong while verifying a webhook or calling the API.
 #[derive(Debug, Error)]
 pub enum Error {
+    /// The configured app secret is empty — every signature would verify.
+    #[error("app secret must not be empty")]
+    EmptySecret,
+
     /// The signature header was missing or not parseable as `sha256=<hex>`.
     #[error("malformed signature header: {0}")]
     MalformedSignature(String),

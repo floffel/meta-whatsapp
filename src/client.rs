@@ -9,7 +9,6 @@ use crate::transport::Transport;
 pub const DEFAULT_API_VERSION: &str = "v21.0";
 
 /// Client bound to one business phone number.
-#[derive(Debug)]
 pub struct WhatsAppClient<T: Transport> {
     phone_number_id: String,
     token: String,
@@ -87,5 +86,16 @@ impl<T: Transport> WhatsAppClient<T> {
         self.transport
             .post_json(&self.messages_url(), &self.token, &payload)
             .await
+    }
+}
+
+impl<T: Transport> std::fmt::Debug for WhatsAppClient<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Never print the access token.
+        f.debug_struct("WhatsAppClient")
+            .field("phone_number_id", &self.phone_number_id)
+            .field("api_version", &self.api_version)
+            .field("base_url", &self.base_url)
+            .finish_non_exhaustive()
     }
 }
