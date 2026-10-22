@@ -60,7 +60,7 @@ fn verify_and_parse_returns_typed_payload() {
     let header = v.sign(BODY);
     let payload = v.verify_and_parse(BODY, &header).unwrap();
     assert_eq!(payload.object, "whatsapp_business_account");
-    assert!(payload.entry.is_empty());
+    assert_eq!(payload.entry, Vec::new());
 }
 
 #[test]
