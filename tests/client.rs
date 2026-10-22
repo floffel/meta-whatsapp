@@ -25,12 +25,17 @@ impl RecordingTransport {
 }
 
 impl Transport for RecordingTransport {
-    async fn post_json(&self, url: &str, token: &str, body: &Value) -> Result<Value> {
+    fn post_json(
+        &self,
+        url: &str,
+        token: &str,
+        body: &Value,
+    ) -> impl std::future::Future<Output = Result<Value>> {
         self.calls
             .lock()
             .unwrap()
             .push((url.to_string(), token.to_string(), body.clone()));
-        Ok(self.response.clone())
+        std::future::ready(Ok(self.response.clone()))
     }
 }
 
@@ -94,8 +99,13 @@ async fn transport_errors_are_propagated() {
     #[derive(Clone)]
     struct Failing;
     impl Transport for Failing {
-        async fn post_json(&self, _: &str, _: &str, _: &Value) -> Result<Value> {
-            Err(meta_whatsapp::Error::Transport("boom".into()))
+        fn post_json(
+            &self,
+            _: &str,
+            _: &str,
+            _: &Value,
+        ) -> impl std::future::Future<Output = Result<Value>> {
+            std::future::ready(Err(meta_whatsapp::Error::Transport("boom".into())))
         }
     }
 
