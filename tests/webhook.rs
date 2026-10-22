@@ -78,7 +78,13 @@ fn verify_and_parse_rejects_invalid_json() {
 fn challenge_handshake_accepts_matching_token() {
     let v = WebhookVerifier::new(b"secret".to_vec());
     assert_eq!(
-        v.verify_challenge(Some("subscribe"), Some("tok"), Some("1234"), "tok", "subscribe"),
+        v.verify_challenge(
+            Some("subscribe"),
+            Some("tok"),
+            Some("1234"),
+            "tok",
+            "subscribe"
+        ),
         Some("1234")
     );
 }
@@ -87,11 +93,23 @@ fn challenge_handshake_accepts_matching_token() {
 fn challenge_handshake_rejects_mismatches() {
     let v = WebhookVerifier::new(b"secret".to_vec());
     assert_eq!(
-        v.verify_challenge(Some("subscribe"), Some("wrong"), Some("1234"), "tok", "subscribe"),
+        v.verify_challenge(
+            Some("subscribe"),
+            Some("wrong"),
+            Some("1234"),
+            "tok",
+            "subscribe"
+        ),
         None
     );
     assert_eq!(
-        v.verify_challenge(Some("unsubscribe"), Some("tok"), Some("1234"), "tok", "subscribe"),
+        v.verify_challenge(
+            Some("unsubscribe"),
+            Some("tok"),
+            Some("1234"),
+            "tok",
+            "subscribe"
+        ),
         None
     );
     assert_eq!(

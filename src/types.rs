@@ -15,7 +15,7 @@ pub struct WebhookPayload {
 /// One business account's batch of changes.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Entry {
-    /// WhatsApp Business Account id.
+    /// `WhatsApp` Business Account id.
     pub id: String,
     /// Events for that account.
     #[serde(default)]
@@ -62,7 +62,7 @@ pub struct Metadata {
 pub struct Message {
     /// Provider message id (use it as idempotency key).
     pub id: String,
-    /// Sender's WhatsApp id (phone number, digits only).
+    /// Sender's `WhatsApp` id (phone number, digits only).
     pub from: String,
     /// Unix timestamp as string, as sent by Meta.
     #[serde(default)]
@@ -92,7 +92,7 @@ pub struct Status {
     /// Unix timestamp as string.
     #[serde(default)]
     pub timestamp: String,
-    /// Recipient WhatsApp id.
+    /// Recipient `WhatsApp` id.
     #[serde(default)]
     pub recipient_id: String,
 }
@@ -106,12 +106,7 @@ impl WebhookPayload {
             .flat_map(|e| e.changes.iter())
             .filter_map(|c| {
                 let phone_number_id = c.value.metadata.as_ref()?.phone_number_id.as_str();
-                Some(
-                    c.value
-                        .messages
-                        .iter()
-                        .map(move |m| (phone_number_id, m)),
-                )
+                Some(c.value.messages.iter().map(move |m| (phone_number_id, m)))
             })
             .flatten()
     }

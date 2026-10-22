@@ -13,7 +13,10 @@ struct RecordingTransport {
 
 impl RecordingTransport {
     fn new(response: Value) -> Self {
-        Self { calls: Arc::default(), response }
+        Self {
+            calls: Arc::default(),
+            response,
+        }
     }
 
     fn calls(&self) -> Vec<(String, String, Value)> {
@@ -46,7 +49,10 @@ async fn send_text_posts_to_the_messages_endpoint() {
     let calls = transport.calls();
     assert_eq!(calls.len(), 1);
     let (url, token, body) = &calls[0];
-    assert!(url.ends_with("/v21.0/106540352242922/messages"), "url was {url}");
+    assert!(
+        url.ends_with("/v21.0/106540352242922/messages"),
+        "url was {url}"
+    );
     assert!(url.starts_with("https://"));
     assert_eq!(token, "EAAG-token");
     assert_eq!(body["messaging_product"], "whatsapp");

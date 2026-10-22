@@ -37,13 +37,21 @@ impl WebhookVerifier {
     /// Creates a verifier for the given Meta app secret.
     #[must_use]
     pub fn new(secret: impl Into<Vec<u8>>) -> Self {
-        Self { secret: secret.into() }
+        Self {
+            secret: secret.into(),
+        }
     }
 
     /// Computes the header value for `body` — handy for tests and fixtures.
+    ///
+    /// # Panics
+    ///
+    /// Never in practice: HMAC accepts keys of any length. The internal
+    /// `expect` only guards a contract that cannot fail.
     #[must_use]
     pub fn sign(&self, body: &[u8]) -> String {
-        let mut mac = HmacSha256::new_from_slice(&self.secret).expect("HMAC accepts any key length");
+        let mut mac =
+            HmacSha256::new_from_slice(&self.secret).expect("HMAC accepts any key length");
         mac.update(body);
         format!("sha256={}", hex::encode(mac.finalize().into_bytes()))
     }
@@ -54,6 +62,10 @@ impl WebhookVerifier {
     ///
     /// Returns [`Error::MalformedSignature`] when the header is not
     /// `sha256=<hex>` and [`Error::SignatureMismatch`] when it does not match.
+    ///
+    /// # Panics
+    ///
+    /// Never in practice: HMAC accepts keys of any length.
     pub fn verify(&self, body: &[u8], header: &str) -> Result<()> {
         let hex_part = header
             .strip_prefix("sha256=")
@@ -66,7 +78,8 @@ impl WebhookVerifier {
             return Err(Error::MalformedSignature(header.to_string()));
         }
 
-        let mut mac = HmacSha256::new_from_slice(&self.secret).expect("HMAC accepts any key length");
+        let mut mac =
+            HmacSha256::new_from_slice(&self.secret).expect("HMAC accepts any key length");
         mac.update(body);
         mac.verify_slice(&received)
             .map_err(|_| Error::SignatureMismatch)

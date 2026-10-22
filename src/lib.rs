@@ -36,8 +36,8 @@ pub mod webhook;
 
 pub use client::{WhatsAppClient, DEFAULT_API_VERSION};
 pub use error::{Error, Result};
-pub use transport::Transport;
 #[cfg(feature = "http")]
 pub use transport::ReqwestTransport;
+pub use transport::Transport;
 pub use types::{Message, Status, WebhookPayload};
 pub use webhook::WebhookVerifier;
