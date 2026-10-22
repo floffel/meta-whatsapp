@@ -19,6 +19,17 @@ pub trait Transport {
 }
 
 /// `reqwest`-based transport, enabled by default via the `http` feature.
+///
+/// ```
+/// # #[cfg(feature = "http")]
+/// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+/// use meta_whatsapp::{ReqwestTransport, WhatsAppClient};
+///
+/// let client = WhatsAppClient::new("1234567890", "EAAG...", ReqwestTransport::new());
+/// client.send_text("4915112345678", "Hallo!").await?;
+/// # Ok(())
+/// # }
+/// ```
 #[cfg(feature = "http")]
 #[derive(Debug, Clone, Default)]
 pub struct ReqwestTransport {

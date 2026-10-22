@@ -10,19 +10,14 @@
 //! and you can plug in your own client stack.
 //!
 //! ```
-//! use meta_whatsapp::{WebhookVerifier, WhatsAppClient, ReqwestTransport};
-//!
-//! # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
-//! let client = WhatsAppClient::new("1234567890", "EAAG...", ReqwestTransport::new());
-//! client.send_text("4915112345678", "Hallo!").await?;
+//! use meta_whatsapp::WebhookVerifier;
 //!
 //! let verifier = WebhookVerifier::new("app-secret");
 //! let body = br#"{"object":"whatsapp_business_account","entry":[]}"#;
 //! let header = verifier.sign(body);
 //! let payload = verifier.verify_and_parse(body, &header)?;
 //! assert!(payload.inbound_messages().next().is_none());
-//! # Ok(())
-//! # }
+//! # Ok::<(), meta_whatsapp::Error>(())
 //! ```
 
 #![forbid(unsafe_code)]
