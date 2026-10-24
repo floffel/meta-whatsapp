@@ -1,26 +1,358 @@
 //! Pluggable HTTP transport so the client stays testable without a network.
+//!
+//! The trait is deliberately one method wide: [`Transport::execute`] takes a
+//! [`Request`] and returns a [`Response`]. Everything above it — status
+//! classification, error envelopes, `Retry-After`, JSON decoding — lives in
+//! [`crate::client`], so a mock transport can exercise every branch without a
+//! socket.
+
+use std::collections::BTreeMap;
+use std::time::Duration;
+
+use serde_json::Value;
 
 use crate::error::{Error, Result};
+use crate::media::MediaUpload;
 
-/// Minimal abstraction over "POST JSON with a bearer token".
+/// HTTP verb. Only the three the Cloud API needs.
 ///
-/// Implement it for your own HTTP stack, or use [`ReqwestTransport`] when the
-/// `http` feature is enabled.
+/// ```
+/// use meta_whatsapp::transport::Method;
+///
+/// assert_eq!(Method::Post.as_str(), "POST");
+/// assert_eq!(Method::Get.as_str(), "GET");
+/// assert_eq!(Method::Delete.as_str(), "DELETE");
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum Method {
+    /// Read a resource (media metadata, template list).
+    Get,
+    /// Send a message or upload media.
+    Post,
+    /// Remove uploaded media.
+    Delete,
+}
+
+impl Method {
+    /// Upper-case name as used on the wire.
+    ///
+    /// ```
+    /// use meta_whatsapp::transport::Method;
+    /// assert_eq!(Method::Delete.as_str(), "DELETE");
+    /// ```
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Get => "GET",
+            Self::Post => "POST",
+            Self::Delete => "DELETE",
+        }
+    }
+}
+
+/// What goes into the request body.
+///
+/// ```
+/// use meta_whatsapp::transport::{Method, Request, RequestBody};
+///
+/// let payload = serde_json::json!({"hello": "world"});
+/// let request =
+///     Request::post_json("https://graph.facebook.com/v21.0/1/messages", "token", &payload);
+/// assert_eq!(request.method, Method::Post);
+/// assert!(matches!(request.body, RequestBody::Json(_)));
+/// ```
+#[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
+pub enum RequestBody<'a> {
+    /// No body (GET, DELETE).
+    Empty,
+    /// `application/json`, already rendered.
+    Json(&'a Value),
+    /// `multipart/form-data`, encoded by [`MediaUpload::encode`].
+    Multipart(&'a MediaUpload),
+}
+
+/// A single HTTP call, transport agnostic.
+///
+/// The access token travels in the `Authorization: Bearer` header; it is never
+/// part of the URL, so it cannot leak through proxy logs or error messages.
+///
+/// ```
+/// use meta_whatsapp::transport::Request;
+///
+/// let request = Request::get("https://graph.facebook.com/v21.0/123", "EAAG")
+///     .with_timeout(Some(std::time::Duration::from_secs(5)));
+/// assert_eq!(request.token, "EAAG");
+/// assert_eq!(request.timeout.unwrap().as_secs(), 5);
+/// ```
+#[derive(Debug, Clone, Copy)]
+pub struct Request<'a> {
+    /// Verb to use.
+    pub method: Method,
+    /// Absolute URL.
+    pub url: &'a str,
+    /// Bearer token (the access token).
+    pub token: &'a str,
+    /// Per-request timeout; `None` leaves the transport default in place.
+    pub timeout: Option<Duration>,
+    /// Request body.
+    pub body: RequestBody<'a>,
+}
+
+impl<'a> Request<'a> {
+    /// A GET with no body.
+    ///
+    /// ```
+    /// use meta_whatsapp::transport::{Method, Request};
+    /// assert_eq!(Request::get("https://x.test/a", "t").method, Method::Get);
+    /// ```
+    #[must_use]
+    pub fn get(url: &'a str, token: &'a str) -> Self {
+        Self {
+            method: Method::Get,
+            url,
+            token,
+            timeout: None,
+            body: RequestBody::Empty,
+        }
+    }
+
+    /// A POST with a JSON body.
+    ///
+    /// ```
+    /// use meta_whatsapp::transport::Request;
+    /// let body = serde_json::json!({"a": 1});
+    /// assert!(matches!(
+    ///     Request::post_json("https://x.test/a", "t", &body).body,
+    ///     meta_whatsapp::transport::RequestBody::Json(_)
+    /// ));
+    /// ```
+    #[must_use]
+    pub fn post_json(url: &'a str, token: &'a str, body: &'a Value) -> Self {
+        Self {
+            method: Method::Post,
+            url,
+            token,
+            timeout: None,
+            body: RequestBody::Json(body),
+        }
+    }
+
+    /// A POST with a `multipart/form-data` body.
+    ///
+    /// ```
+    /// use meta_whatsapp::transport::Request;
+    /// use meta_whatsapp::MediaUpload;
+    ///
+    /// let upload = MediaUpload::new("a.txt", "text/plain", b"hi".to_vec())?;
+    /// let request = Request::post_multipart("https://x.test/media", "t", &upload);
+    /// assert!(matches!(
+    ///     request.body,
+    ///     meta_whatsapp::transport::RequestBody::Multipart(_)
+    /// ));
+    /// # Ok::<(), meta_whatsapp::Error>(())
+    /// ```
+    #[must_use]
+    pub fn post_multipart(url: &'a str, token: &'a str, upload: &'a MediaUpload) -> Self {
+        Self {
+            method: Method::Post,
+            url,
+            token,
+            timeout: None,
+            body: RequestBody::Multipart(upload),
+        }
+    }
+
+    /// A DELETE with no body.
+    ///
+    /// ```
+    /// use meta_whatsapp::transport::{Method, Request};
+    /// assert_eq!(Request::delete("https://x.test/a", "t").method, Method::Delete);
+    /// ```
+    #[must_use]
+    pub fn delete(url: &'a str, token: &'a str) -> Self {
+        Self {
+            method: Method::Delete,
+            url,
+            token,
+            timeout: None,
+            body: RequestBody::Empty,
+        }
+    }
+
+    /// Attaches a per-request timeout (no-op for `None`).
+    ///
+    /// ```
+    /// use std::time::Duration;
+    /// use meta_whatsapp::transport::Request;
+    ///
+    /// let request =
+    ///     Request::get("https://x.test/a", "t").with_timeout(Some(Duration::from_secs(2)));
+    /// assert_eq!(request.timeout, Some(Duration::from_secs(2)));
+    /// ```
+    #[must_use]
+    pub fn with_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.timeout = timeout;
+        self
+    }
+}
+
+/// A response as the client needs it: status, headers, body.
+///
+/// Header names are normalised to lower case on construction, so
+/// [`Response::header`] works regardless of the casing the transport saw.
+///
+/// ```
+/// use meta_whatsapp::transport::Response;
+///
+/// let response = Response::new(
+///     200,
+///     [("Content-Type".to_string(), "application/json".to_string())],
+///     br#"{"ok":true}"#.to_vec(),
+/// );
+/// assert!(response.is_success());
+/// assert_eq!(response.header("content-type"), Some("application/json"));
+/// assert_eq!(response.json().unwrap()["ok"], true);
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Response {
+    status: u16,
+    headers: BTreeMap<String, String>,
+    body: Vec<u8>,
+}
+
+impl Response {
+    /// Builds a response, lower-casing header names.
+    ///
+    /// ```
+    /// use meta_whatsapp::transport::Response;
+    ///
+    /// let response = Response::new(204, std::iter::empty(), Vec::new());
+    /// assert_eq!(response.json().unwrap(), serde_json::json!({}));
+    /// ```
+    pub fn new(
+        status: u16,
+        headers: impl IntoIterator<Item = (String, String)>,
+        body: Vec<u8>,
+    ) -> Self {
+        Self {
+            status,
+            headers: headers
+                .into_iter()
+                .map(|(name, value)| (name.to_ascii_lowercase(), value))
+                .collect(),
+            body,
+        }
+    }
+
+    /// HTTP status code.
+    ///
+    /// ```
+    /// use meta_whatsapp::transport::Response;
+    /// assert_eq!(Response::new(429, std::iter::empty(), Vec::new()).status(), 429);
+    /// ```
+    #[must_use]
+    pub fn status(&self) -> u16 {
+        self.status
+    }
+
+    /// Case-insensitive header lookup.
+    ///
+    /// ```
+    /// use meta_whatsapp::transport::Response;
+    /// let response = Response::new(429, [("Retry-After".into(), "3".into())], Vec::new());
+    /// assert_eq!(response.header("retry-after"), Some("3"));
+    /// ```
+    #[must_use]
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .get(&name.to_ascii_lowercase())
+            .map(String::as_str)
+    }
+
+    /// Raw body bytes.
+    ///
+    /// ```
+    /// use meta_whatsapp::transport::Response;
+    /// assert_eq!(Response::new(200, std::iter::empty(), b"hi".to_vec()).body(), b"hi");
+    /// ```
+    #[must_use]
+    pub fn body(&self) -> &[u8] {
+        &self.body
+    }
+
+    /// Whether the status is 2xx.
+    ///
+    /// ```
+    /// use meta_whatsapp::transport::Response;
+    /// assert!(Response::new(201, std::iter::empty(), Vec::new()).is_success());
+    /// assert!(!Response::new(500, std::iter::empty(), Vec::new()).is_success());
+    /// ```
+    #[must_use]
+    pub fn is_success(&self) -> bool {
+        (200..300).contains(&self.status)
+    }
+
+    /// Parses the body as JSON; an empty body becomes `{}` so callers can
+    /// index the result unconditionally.
+    ///
+    /// ```
+    /// use meta_whatsapp::transport::Response;
+    ///
+    /// let response = Response::new(200, std::iter::empty(), br#"{"messages":[]}"#.to_vec());
+    /// assert_eq!(response.json().unwrap()["messages"], serde_json::json!([]));
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Json`] when the body is not valid JSON.
+    pub fn json(&self) -> Result<Value> {
+        if self.body.iter().all(u8::is_ascii_whitespace) {
+            return Ok(serde_json::json!({}));
+        }
+        serde_json::from_slice(&self.body).map_err(Error::from)
+    }
+}
+
+/// Performs one HTTP request. Implement it for your own stack, or use
+/// `ReqwestTransport`.
+///
+/// Implementations must:
+///
+/// * send `Authorization: Bearer <token>` and never log the token,
+/// * return the raw status, headers and body even for non-2xx (the client
+///   decides what is retryable),
+/// * classify connection failures as [`Error::transport`] (retryable).
+///
+/// ```
+/// use meta_whatsapp::transport::{Request, Response, Transport};
+/// use meta_whatsapp::Result;
+///
+/// struct AlwaysOk;
+///
+/// impl Transport for AlwaysOk {
+///     async fn execute(&self, request: Request<'_>) -> Result<Response> {
+///         assert!(request.url.starts_with("https://"));
+///         Ok(Response::new(200, std::iter::empty(), b"{}".to_vec()))
+///     }
+/// }
+/// ```
 #[allow(async_fn_in_trait)]
 pub trait Transport {
-    /// POSTs `body` to `url` with `Authorization: Bearer <token>` and returns
-    /// the parsed JSON response (an empty object for 2xx without a body).
-    fn post_json(
-        &self,
-        url: &str,
-        token: &str,
-        body: &serde_json::Value,
-    ) -> impl std::future::Future<Output = Result<serde_json::Value>>;
+    /// Executes `request` and returns the response, whatever its status.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Transport`] when no response could be obtained.
+    fn execute(&self, request: Request<'_>) -> impl std::future::Future<Output = Result<Response>>;
 }
 
 /// `reqwest`-based transport, enabled by default via the `http` feature.
 ///
-/// ```
+/// The client is cheap to clone and safe to share across tasks.
+///
+/// ```no_run
 /// # #[cfg(feature = "http")]
 /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
 /// use meta_whatsapp::{ReqwestTransport, WhatsAppClient};
@@ -38,7 +370,12 @@ pub struct ReqwestTransport {
 
 #[cfg(feature = "http")]
 impl ReqwestTransport {
-    /// Creates a transport with a default client.
+    /// Creates a transport with a default client (rustls, redirects followed).
+    ///
+    /// ```
+    /// # #[cfg(feature = "http")]
+    /// let transport = meta_whatsapp::ReqwestTransport::new();
+    /// ```
     #[must_use]
     pub fn new() -> Self {
         Self::default()
@@ -47,56 +384,65 @@ impl ReqwestTransport {
 
 #[cfg(feature = "http")]
 impl Transport for ReqwestTransport {
-    async fn post_json(
-        &self,
-        url: &str,
-        token: &str,
-        body: &serde_json::Value,
-    ) -> Result<serde_json::Value> {
-        let response = self
-            .client
-            .post(url)
-            .bearer_auth(token)
-            .json(body)
+    async fn execute(&self, request: Request<'_>) -> Result<Response> {
+        let mut builder = match request.method {
+            Method::Get => self.client.get(request.url),
+            Method::Post => self.client.post(request.url),
+            Method::Delete => self.client.delete(request.url),
+        };
+        builder = builder.bearer_auth(request.token);
+        if let Some(timeout) = request.timeout {
+            builder = builder.timeout(timeout);
+        }
+        builder = match request.body {
+            RequestBody::Empty => builder,
+            RequestBody::Json(value) => builder.json(value),
+            RequestBody::Multipart(upload) => {
+                let (content_type, bytes) = upload.encode();
+                builder
+                    .header(reqwest::header::CONTENT_TYPE, content_type)
+                    .body(bytes)
+            }
+        };
+
+        let response = builder
             .send()
             .await
-            .map_err(|e| Error::Transport(e.to_string()))?;
-
-        let status = response.status();
-        let text = response
-            .text()
+            .map_err(|error| describe_reqwest_error(&error))?;
+        let status = response.status().as_u16();
+        let headers = response
+            .headers()
+            .iter()
+            .map(|(name, value)| {
+                (
+                    name.as_str().to_string(),
+                    value.to_str().unwrap_or_default().to_string(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let body = response
+            .bytes()
             .await
-            .map_err(|e| Error::Transport(e.to_string()))?;
+            .map_err(|error| describe_reqwest_error(&error))?
+            .to_vec();
 
-        if !status.is_success() {
-            return Err(parse_graph_error(&text, status.as_u16()));
-        }
-        if text.trim().is_empty() {
-            return Ok(serde_json::json!({}));
-        }
-        serde_json::from_str(&text).map_err(|e| Error::Payload(e.to_string()))
+        Ok(Response::new(status, headers, body))
     }
 }
 
-/// Turns a Graph API error envelope into [`Error::Api`], falling back to the
-/// raw body when the shape is unexpected.
+/// Maps a `reqwest` failure to a retryable transport error without echoing
+/// headers (which would contain the token).
 #[cfg(feature = "http")]
-fn parse_graph_error(text: &str, status: u16) -> Error {
-    #[derive(serde::Deserialize)]
-    struct Envelope {
-        error: Body,
-    }
-    #[derive(serde::Deserialize)]
-    struct Body {
-        code: i64,
-        message: String,
-    }
-
-    match serde_json::from_str::<Envelope>(text) {
-        Ok(Envelope { error }) => Error::Api {
-            code: error.code,
-            message: error.message,
-        },
-        Err(_) => Error::Transport(format!("http {status}: {text}")),
-    }
+fn describe_reqwest_error(error: &reqwest::Error) -> Error {
+    let kind = if error.is_timeout() {
+        "timeout"
+    } else if error.is_connect() {
+        "connect"
+    } else if error.is_body() || error.is_decode() {
+        "body"
+    } else {
+        "request"
+    };
+    // `reqwest::Error` renders the URL but never the Authorization header.
+    Error::transport(format!("{kind}: {error}"))
 }
