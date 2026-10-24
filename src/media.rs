@@ -160,8 +160,7 @@ pub fn validate_media_id(id: &str) -> Result<()> {
 /// let link = MediaRef::link("https://cdn.example.com/cat.png");
 /// assert!(link.validate().is_ok());
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(untagged)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum MediaRef {
     /// An id returned by [`crate::WhatsAppClient::upload_media`].
