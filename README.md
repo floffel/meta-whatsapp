@@ -181,6 +181,12 @@ with a token the API just rejected.
 * `ReqwestTransport` classifies `reqwest` failures by phase: `is_connect()` is
   "before the write" (retryable), a timeout or body/decode error is "after the
   write" (ambiguous for a send), and anything else is terminal.
+* TLS trust store: the `http` feature builds `reqwest` with
+  `default-features = false, features = ["json", "rustls"]`. `reqwest` 0.13
+  validates against the platform trust store (`rustls-platform-verifier`) and
+  no longer offers the bundled `webpki-roots` feature, so a minimal container
+  without `ca-certificates` must install one (or supply its own
+  `reqwest::Client` through the `Transport` trait).
 
 ## Unverified against the provider docs
 
