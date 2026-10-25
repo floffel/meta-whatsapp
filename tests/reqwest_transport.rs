@@ -11,22 +11,37 @@ use std::time::Duration;
 use meta_whatsapp::error::TransportPhase;
 use meta_whatsapp::transport::{Request, Transport};
 use meta_whatsapp::ReqwestTransport;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
 /// Serves one request with a fixed response and returns the base URL.
+///
+/// The request head is read to completion before answering: writing first (or
+/// dropping the socket early) makes the client fail with a broken pipe on
+/// Linux, which is a property of the harness, not of the transport.
 async fn serve_once(response: &'static [u8]) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        if let Ok((mut socket, _)) = listener.accept().await {
-            // Read whatever the client sent, then answer.
-            let mut buffer = [0_u8; 1024];
-            let _ = socket.readable().await;
-            let _ = socket.try_read(&mut buffer);
-            let _ = socket.write_all(response).await;
-            let _ = socket.flush().await;
+        let Ok((mut socket, _)) = listener.accept().await else {
+            return;
+        };
+        let mut head = Vec::new();
+        let mut buffer = [0_u8; 512];
+        loop {
+            match socket.read(&mut buffer).await {
+                Ok(0) | Err(_) => break,
+                Ok(read) => {
+                    head.extend_from_slice(&buffer[..read]);
+                    if head.windows(4).any(|window| window == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+            }
         }
+        let _ = socket.write_all(response).await;
+        let _ = socket.flush().await;
+        let _ = socket.shutdown().await;
     });
     format!("http://{address}")
 }
