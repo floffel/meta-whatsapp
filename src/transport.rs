@@ -11,6 +11,8 @@ use std::time::Duration;
 
 use serde_json::Value;
 
+#[cfg(feature = "http")]
+use crate::error::TransportPhase;
 use crate::error::{Error, Result};
 use crate::media::MediaUpload;
 
@@ -181,6 +183,45 @@ impl<'a> Request<'a> {
         }
     }
 
+    /// A DELETE that carries a JSON body — the Graph API wants the ids to
+    /// remove in the body, not the path.
+    ///
+    /// ```
+    /// use meta_whatsapp::transport::{Method, Request};
+    ///
+    /// let body = serde_json::json!({"block_users": [{"user": "+16505551234"}]});
+    /// let request = Request::delete_json("https://x.test/block_users", "t", &body);
+    /// assert_eq!(request.method, Method::Delete);
+    /// assert_eq!(request.body_json().unwrap()["block_users"][0]["user"], "+16505551234");
+    /// ```
+    #[must_use]
+    pub fn delete_json(url: &'a str, token: &'a str, body: &'a Value) -> Self {
+        Self {
+            method: Method::Delete,
+            url,
+            token,
+            timeout: None,
+            body: RequestBody::Json(body),
+        }
+    }
+
+    /// The JSON body, when this request carries one.
+    ///
+    /// ```
+    /// use meta_whatsapp::transport::Request;
+    ///
+    /// let body = serde_json::json!({"a": 1});
+    /// assert!(Request::post_json("https://x.test/a", "t", &body).body_json().is_some());
+    /// assert!(Request::get("https://x.test/a", "t").body_json().is_none());
+    /// ```
+    #[must_use]
+    pub fn body_json(&self) -> Option<&'a Value> {
+        match self.body {
+            RequestBody::Json(value) => Some(value),
+            _ => None,
+        }
+    }
+
     /// Attaches a per-request timeout (no-op for `None`).
     ///
     /// ```
@@ -313,6 +354,30 @@ impl Response {
         }
         serde_json::from_slice(&self.body).map_err(Error::from)
     }
+
+    /// The rate-limit budget Meta reported in `X-Business-Use-Case-Usage`.
+    ///
+    /// The header is optional and absent on most responses (and on every
+    /// non-Graph transport); `None` means "no budget information", not
+    /// "zero usage". See [`crate::usage::BusinessUseCaseUsage`].
+    ///
+    /// ```
+    /// use meta_whatsapp::transport::Response;
+    ///
+    /// let header = r#"{"123456":[{"type":"whatsapp","call_count":2,"total_cputime":1,"total_time":1,"estimated_time_to_regain_access":0}]}"#;
+    /// let response = Response::new(
+    ///     200,
+    ///     [("X-Business-Use-Case-Usage".to_string(), header.to_string())],
+    ///     br#"{"messages":[{"id":"wamid.1"}]}"#.to_vec(),
+    /// );
+    /// let usage = response.business_use_case_usage().unwrap();
+    /// assert_eq!(usage.for_business("123456")[0].call_count, Some(2));
+    /// ```
+    #[must_use]
+    pub fn business_use_case_usage(&self) -> Option<crate::usage::BusinessUseCaseUsage> {
+        self.header("x-business-use-case-usage")
+            .and_then(crate::usage::BusinessUseCaseUsage::from_header)
+    }
 }
 
 /// Performs one HTTP request. Implement it for your own stack, or use
@@ -430,19 +495,62 @@ impl Transport for ReqwestTransport {
     }
 }
 
-/// Maps a `reqwest` failure to a retryable transport error without echoing
-/// headers (which would contain the token).
+/// What kind of connection failure a `reqwest` error reports, independent of
+/// the HTTP stack. Split out so the phase mapping stays a pure, tested
+/// function.
+#[cfg(feature = "http")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FailureKind {
+    /// DNS, TCP connect or TLS handshake failed.
+    Connect,
+    /// Timed out, or the body/response could not be read.
+    Response,
+    /// Anything else: a URL or builder error the transport cannot fix.
+    Other,
+}
+
+/// Maps a failure kind to the request phase it implies.
+///
+/// A connect failure means nothing was written, so a retry is safe. Everything
+/// else (timeout, truncated body, decode error) happens after the request went
+/// out and is therefore ambiguous for a non-idempotent request.
+#[cfg(feature = "http")]
+fn phase_of(kind: FailureKind) -> TransportPhase {
+    match kind {
+        FailureKind::Connect => TransportPhase::BeforeWrite,
+        FailureKind::Response => TransportPhase::AfterWrite,
+        FailureKind::Other => TransportPhase::Terminal,
+    }
+}
+
+/// Maps a `reqwest` failure to a transport error carrying its lifecycle phase,
+/// without echoing headers (which would contain the token).
 #[cfg(feature = "http")]
 fn describe_reqwest_error(error: &reqwest::Error) -> Error {
-    let kind = if error.is_timeout() {
-        "timeout"
-    } else if error.is_connect() {
-        "connect"
+    let (kind, label) = if error.is_connect() {
+        (FailureKind::Connect, "connect")
+    } else if error.is_timeout() {
+        (FailureKind::Response, "timeout")
     } else if error.is_body() || error.is_decode() {
-        "body"
+        (FailureKind::Response, "body")
     } else {
-        "request"
+        (FailureKind::Other, "request")
     };
     // `reqwest::Error` renders the URL but never the Authorization header.
-    Error::transport(format!("{kind}: {error}"))
+    Error::Transport {
+        message: format!("{label}: {error}"),
+        phase: phase_of(kind),
+    }
+}
+
+#[cfg(all(test, feature = "http"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_connect_failures_count_as_before_the_write() {
+        assert_eq!(phase_of(FailureKind::Connect), TransportPhase::BeforeWrite);
+        assert_eq!(phase_of(FailureKind::Response), TransportPhase::AfterWrite);
+        assert_eq!(phase_of(FailureKind::Other), TransportPhase::Terminal);
+    }
 }

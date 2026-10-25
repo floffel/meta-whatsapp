@@ -1,10 +1,204 @@
-//! Retry budget: exponential backoff with an explicit ceiling.
+//! Retry budget and retry classification.
 //!
-//! The policy is pure data plus one pure decision function, so the loop in
-//! [`crate::client`] stays a thin shell and the arithmetic is testable —
-//! including property tests over arbitrary delays and attempt counts.
+//! Two pure pieces, no timers: [`RetryPolicy::delay`] decides *how long* to
+//! wait, [`RetryPolicy::decide`] decides *whether waiting is safe at all*. The
+//! loop in [`crate::client`] only sleeps and re-sends, so the interesting
+//! arithmetic and the delivery contract are testable — including property
+//! tests that pin "no non-idempotent request is retried after a 5xx".
 
 use std::time::Duration;
+
+use crate::error::Error;
+use crate::transport::Method;
+
+/// Whether repeating a request could duplicate its effect.
+///
+/// ```
+/// use meta_whatsapp::transport::Method;
+/// use meta_whatsapp::retry::Repeatability;
+///
+/// assert_eq!(Repeatability::of_method(Method::Get), Repeatability::Idempotent);
+/// assert_eq!(Repeatability::of_method(Method::Delete), Repeatability::Idempotent);
+/// assert_eq!(Repeatability::of_method(Method::Post), Repeatability::NotIdempotent);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum Repeatability {
+    /// Repeating is harmless: `GET` and `DELETE` are idempotent by definition
+    /// (deleting twice leaves the same state as deleting once).
+    Idempotent,
+    /// Repeating may duplicate an effect: sending a message, uploading media.
+    /// WhatsApp has no idempotency key, so a repeat is visible to the
+    /// recipient.
+    NotIdempotent,
+}
+
+impl Repeatability {
+    /// Classifies an HTTP verb.
+    ///
+    /// ```
+    /// use meta_whatsapp::retry::Repeatability;
+    /// use meta_whatsapp::transport::Method;
+    ///
+    /// assert!(Repeatability::of_method(Method::Get).is_idempotent());
+    /// assert!(!Repeatability::of_method(Method::Post).is_idempotent());
+    /// ```
+    #[must_use]
+    pub fn of_method(method: Method) -> Self {
+        match method {
+            Method::Get | Method::Delete => Self::Idempotent,
+            Method::Post => Self::NotIdempotent,
+        }
+    }
+
+    /// `true` for [`Repeatability::Idempotent`].
+    ///
+    /// ```
+    /// use meta_whatsapp::retry::Repeatability;
+    /// assert!(Repeatability::Idempotent.is_idempotent());
+    /// assert!(!Repeatability::NotIdempotent.is_idempotent());
+    /// ```
+    #[must_use]
+    pub fn is_idempotent(self) -> bool {
+        matches!(self, Self::Idempotent)
+    }
+}
+
+/// One failed attempt, reduced to the facts the retry decision needs.
+///
+/// ```
+/// use meta_whatsapp::retry::Attempt;
+/// use meta_whatsapp::Error;
+///
+/// assert_eq!(Attempt::classify(&Error::transport("dns")), Attempt::NotSent);
+/// assert_eq!(
+///     Attempt::classify(&Error::transport_after_write("timeout")),
+///     Attempt::NoAnswer
+/// );
+/// assert_eq!(Attempt::classify(&Error::validation("to", "empty")), Attempt::Terminal);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Attempt {
+    /// 429: the server refused the request before processing it. Repeating is
+    /// always safe.
+    RateLimited {
+        /// `Retry-After`, when the server sent one.
+        retry_after: Option<Duration>,
+    },
+    /// The connection failed before the request was written (DNS, connect,
+    /// TLS). Nothing was processed.
+    NotSent,
+    /// 5xx: the server may have processed the request before failing.
+    ServerError {
+        /// `Retry-After`, when the server sent one.
+        retry_after: Option<Duration>,
+    },
+    /// The request was written but no response arrived (timeout, reset,
+    /// truncated body).
+    NoAnswer,
+    /// Terminal: 4xx other than 429, validation, signature or decoding
+    /// failures. Repeating cannot help.
+    Terminal,
+}
+
+impl Attempt {
+    /// The server's `Retry-After` hint, when it sent one.
+    ///
+    /// ```
+    /// use std::time::Duration;
+    /// use meta_whatsapp::retry::Attempt;
+    ///
+    /// let attempt = Attempt::RateLimited { retry_after: Some(Duration::from_secs(2)) };
+    /// assert_eq!(attempt.retry_after(), Some(Duration::from_secs(2)));
+    /// assert_eq!(Attempt::NotSent.retry_after(), None);
+    /// ```
+    #[must_use]
+    pub fn retry_after(self) -> Option<Duration> {
+        match self {
+            Self::RateLimited { retry_after } | Self::ServerError { retry_after } => retry_after,
+            _ => None,
+        }
+    }
+
+    /// Reduces an [`Error`] to the facts that drive the decision — purely,
+    /// without I/O.
+    ///
+    /// ```
+    /// use meta_whatsapp::retry::Attempt;
+    /// use meta_whatsapp::Error;
+    ///
+    /// let rate_limited = Error::Api {
+    ///     code: 4,
+    ///     status: 429,
+    ///     message: "slow down".into(),
+    ///     retry_after: Some(std::time::Duration::from_secs(5)),
+    ///     retryable: true,
+    /// };
+    /// assert!(matches!(
+    ///     Attempt::classify(&rate_limited),
+    ///     Attempt::RateLimited { retry_after: Some(_) }
+    /// ));
+    /// ```
+    #[must_use]
+    pub fn classify(error: &Error) -> Self {
+        match error {
+            Error::Api {
+                status,
+                retry_after,
+                ..
+            } => match *status {
+                429 => Self::RateLimited {
+                    retry_after: *retry_after,
+                },
+                500..=599 => Self::ServerError {
+                    retry_after: *retry_after,
+                },
+                _ => Self::Terminal,
+            },
+            // A 5xx that was already wrapped is still a server error; the
+            // wrapper exists so the caller sees the delivery risk.
+            Error::Ambiguous { cause, .. } => Self::classify(cause),
+            Error::Transport { phase, .. } => {
+                if phase.is_after_write() {
+                    Self::NoAnswer
+                } else if phase.is_before_write() {
+                    Self::NotSent
+                } else {
+                    Self::Terminal
+                }
+            }
+            _ => Self::Terminal,
+        }
+    }
+}
+
+/// What to do with a failed attempt.
+///
+/// ```
+/// use std::time::Duration;
+/// use meta_whatsapp::RetryPolicy;
+/// use meta_whatsapp::retry::{Action, Attempt, Repeatability};
+///
+/// let policy = RetryPolicy::default();
+/// let action = policy.decide(
+///     Attempt::RateLimited { retry_after: None },
+///     Repeatability::NotIdempotent,
+///     1,
+/// );
+/// assert!(matches!(action, Action::Retry(_)));
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Action {
+    /// Wait this long, then send again.
+    Retry(Duration),
+    /// Stop and return the error unchanged — the caller may retry later.
+    Surface,
+    /// Stop and return [`Error::Ambiguous`]: the message may have been
+    /// delivered, and the caller has to decide (dedupe, alert, drop).
+    Ambiguous,
+}
 
 /// How often, and how long, the client retries transient failures.
 ///
@@ -159,5 +353,145 @@ impl RetryPolicy {
         let factor = 1_u32 << exponent;
         let backoff = self.base_delay.saturating_mul(factor);
         Some(backoff.min(self.max_delay))
+    }
+
+    /// Whether to retry a failed attempt, and how long to wait — the whole
+    /// delivery contract in one pure function.
+    ///
+    /// The rules, and why:
+    ///
+    /// * **429** — the server refused the request *before* processing it, so a
+    ///   repeat is safe even for a send.
+    /// * **Connection failure before the write** — nothing was processed, so a
+    ///   repeat is safe.
+    /// * **5xx, or no answer after the write, on an idempotent request** —
+    ///   repeating cannot change the outcome (reads, deletes).
+    /// * **5xx, or no answer after the write, on a non-idempotent request** —
+    ///   the message may already be delivered; a repeat could duplicate it, so
+    ///   the answer is [`Action::Ambiguous`], never a retry.
+    ///
+    /// A spent budget always stops the loop; on a non-idempotent request with
+    /// an unknown outcome it still reports [`Action::Ambiguous`].
+    ///
+    /// ```
+    /// use meta_whatsapp::RetryPolicy;
+    /// use meta_whatsapp::retry::{Action, Attempt, Repeatability};
+    ///
+    /// let policy = RetryPolicy::default();
+    ///
+    /// // A 5xx on a send is never retried: it might be delivered already.
+    /// assert_eq!(
+    ///     policy.decide(Attempt::ServerError { retry_after: None }, Repeatability::NotIdempotent, 1),
+    ///     Action::Ambiguous
+    /// );
+    /// // The same 5xx on a list call is retried with backoff.
+    /// assert!(matches!(
+    ///     policy.decide(Attempt::ServerError { retry_after: None }, Repeatability::Idempotent, 1),
+    ///     Action::Retry(_)
+    /// ));
+    /// // A 429 is safe to repeat either way.
+    /// assert!(matches!(
+    ///     policy.decide(Attempt::RateLimited { retry_after: None }, Repeatability::NotIdempotent, 1),
+    ///     Action::Retry(_)
+    /// ));
+    /// ```
+    #[must_use]
+    pub fn decide(
+        &self,
+        attempt: Attempt,
+        repeatability: Repeatability,
+        attempts_failed: u32,
+    ) -> Action {
+        match attempt {
+            Attempt::Terminal => Action::Surface,
+            Attempt::RateLimited { .. } | Attempt::NotSent => {
+                self.retry_or_surface(attempts_failed, attempt.retry_after())
+            }
+            Attempt::ServerError { .. } | Attempt::NoAnswer => {
+                if repeatability.is_idempotent() {
+                    self.retry_or_surface(attempts_failed, attempt.retry_after())
+                } else {
+                    // The request may have taken effect. Never repeat it
+                    // automatically, whatever the budget still allows.
+                    Action::Ambiguous
+                }
+            }
+        }
+    }
+
+    fn retry_or_surface(&self, attempts_failed: u32, retry_after: Option<Duration>) -> Action {
+        match self.delay(attempts_failed, retry_after) {
+            Some(delay) => Action::Retry(delay),
+            None => Action::Surface,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_5xx_on_a_send_is_ambiguous_even_with_budget_left() {
+        let policy = RetryPolicy::new(10);
+        assert_eq!(
+            policy.decide(
+                Attempt::ServerError { retry_after: None },
+                Repeatability::NotIdempotent,
+                1
+            ),
+            Action::Ambiguous
+        );
+    }
+
+    #[test]
+    fn a_timeout_after_the_write_is_ambiguous_for_a_send() {
+        let policy = RetryPolicy::new(10);
+        assert_eq!(
+            policy.decide(Attempt::NoAnswer, Repeatability::NotIdempotent, 1),
+            Action::Ambiguous
+        );
+        assert!(matches!(
+            policy.decide(Attempt::NoAnswer, Repeatability::Idempotent, 1),
+            Action::Retry(_)
+        ));
+    }
+
+    #[test]
+    fn a_failure_before_the_write_is_retried_until_the_budget_is_spent() {
+        let policy = RetryPolicy::new(2);
+        assert!(matches!(
+            policy.decide(Attempt::NotSent, Repeatability::NotIdempotent, 1),
+            Action::Retry(_)
+        ));
+        assert_eq!(
+            policy.decide(Attempt::NotSent, Repeatability::NotIdempotent, 2),
+            Action::Surface
+        );
+    }
+
+    #[test]
+    fn terminal_attempts_are_never_retried() {
+        let policy = RetryPolicy::new(100);
+        assert_eq!(
+            policy.decide(Attempt::Terminal, Repeatability::Idempotent, 1),
+            Action::Surface
+        );
+    }
+
+    #[test]
+    fn a_5xx_keeps_its_retry_after_only_for_idempotent_requests() {
+        let policy = RetryPolicy::new(5);
+        let attempt = Attempt::ServerError {
+            retry_after: Some(Duration::from_secs(2)),
+        };
+        assert_eq!(
+            policy.decide(attempt, Repeatability::Idempotent, 1),
+            Action::Retry(Duration::from_secs(2))
+        );
+        assert_eq!(
+            policy.decide(attempt, Repeatability::NotIdempotent, 1),
+            Action::Ambiguous
+        );
     }
 }

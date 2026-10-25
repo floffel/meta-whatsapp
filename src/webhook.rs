@@ -56,7 +56,10 @@ pub const DEFAULT_MAX_BODY_BYTES: usize = 1024 * 1024;
 /// ```
 #[derive(Clone)]
 pub struct WebhookVerifier {
-    secret: Vec<u8>,
+    /// Keyed hasher built once at construction, where a rejected key is still a
+    /// typed error rather than a panic. The raw secret is not kept: one copy of
+    /// it in memory is enough.
+    hasher: HmacSha256,
     tolerance: Duration,
     max_body_bytes: usize,
 }
@@ -90,8 +93,11 @@ impl WebhookVerifier {
         if secret.is_empty() {
             return Err(Error::EmptySecret);
         }
+        let hasher = HmacSha256::new_from_slice(&secret).map_err(|_| {
+            Error::Payload("the app secret was rejected as an HMAC key".to_string())
+        })?;
         Ok(Self {
-            secret,
+            hasher,
             tolerance: Duration::from_secs(DEFAULT_TOLERANCE_SECS),
             max_body_bytes: DEFAULT_MAX_BODY_BYTES,
         })
@@ -376,9 +382,9 @@ impl WebhookVerifier {
     }
 
     fn mac(&self) -> HmacSha256 {
-        // HMAC accepts keys of any length, so this cannot fail. The `expect`
-        // documents an invariant rather than handling a case.
-        HmacSha256::new_from_slice(&self.secret).expect("HMAC-SHA256 accepts any key length")
+        // Cloning the pre-keyed hasher keeps `sign`/`verify` infallible: the key
+        // was already accepted (or rejected) in `new`.
+        self.hasher.clone()
     }
 }
 

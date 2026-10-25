@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use meta_whatsapp::transport::{Method, Request, RequestBody, Response};
-use meta_whatsapp::{Error, Result, Transport, WhatsAppClient};
+use meta_whatsapp::{Error, Result, Transport, TransportPhase, WhatsAppClient};
 use serde_json::Value;
 
 /// Body as the transport saw it, `multipart` already encoded.
@@ -50,13 +50,42 @@ pub struct Call {
 pub enum Reply {
     /// Return this response.
     Response(Response),
-    /// Fail in the transport layer.
+    /// Fail in the transport layer, at `phase`.
     Failure {
         /// Error message.
         message: String,
-        /// Whether a retry could help.
-        retryable: bool,
+        /// Where in the request lifecycle the failure happened.
+        phase: TransportPhase,
     },
+}
+
+impl Reply {
+    /// A DNS/connect/TLS failure: nothing was written, safe to retry.
+    #[must_use]
+    pub fn not_sent(message: &str) -> Self {
+        Self::Failure {
+            message: message.to_string(),
+            phase: TransportPhase::BeforeWrite,
+        }
+    }
+
+    /// A timeout or reset after the request was written.
+    #[must_use]
+    pub fn after_write(message: &str) -> Self {
+        Self::Failure {
+            message: message.to_string(),
+            phase: TransportPhase::AfterWrite,
+        }
+    }
+
+    /// A failure no retry can fix.
+    #[must_use]
+    pub fn terminal(message: &str) -> Self {
+        Self::Failure {
+            message: message.to_string(),
+            phase: TransportPhase::Terminal,
+        }
+    }
 }
 
 /// Records calls and replays scripted replies (default: `200 {}`).
@@ -147,11 +176,7 @@ impl Transport for MockTransport {
 
         match reply {
             Some(Reply::Response(response)) => Ok(response),
-            Some(Reply::Failure { message, retryable }) => Err(if retryable {
-                Error::transport(message)
-            } else {
-                Error::transport_terminal(message)
-            }),
+            Some(Reply::Failure { message, phase }) => Err(Error::Transport { message, phase }),
             None => Ok(json_response(&serde_json::json!({}))),
         }
     }

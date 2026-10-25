@@ -8,7 +8,7 @@ use std::time::Duration;
 use common::{
     accepted, client, instant_retry, json_response, response, Call, MockTransport, Reply,
 };
-use meta_whatsapp::{Error, RetryPolicy, WhatsAppClient};
+use meta_whatsapp::{Error, RetryPolicy, TransportPhase, WhatsAppClient};
 use serde_json::json;
 
 fn failure_after(calls: usize) -> MockTransport {
@@ -22,6 +22,22 @@ fn failure_after(calls: usize) -> MockTransport {
     }
     transport.push_response(accepted("wamid.after-retry"));
     transport
+}
+
+#[tokio::test]
+async fn a_connection_failure_before_the_write_is_retried_even_for_a_send() {
+    let transport = MockTransport::new();
+    transport.push(Reply::not_sent("dns: no such host"));
+    transport.push_response(accepted("wamid.after-retry"));
+    let client = client(transport.clone()).with_retry(instant_retry(2));
+
+    let value = client.send_text("1", "hi").await.unwrap();
+    assert_eq!(value["messages"][0]["id"], "wamid.after-retry");
+    assert_eq!(
+        transport.call_count(),
+        2,
+        "nothing was written the first time"
+    );
 }
 
 #[tokio::test]
@@ -94,13 +110,24 @@ async fn retry_after_is_honoured_on_429() {
 }
 
 #[tokio::test]
-async fn five_hundreds_are_retried_until_the_budget_is_spent() {
-    let transport = failure_after(2);
+async fn five_hundreds_are_retried_on_reads() {
+    let transport = MockTransport::new();
+    for _ in 0..2 {
+        transport.push_response(response(
+            500,
+            &[],
+            b"{\"error\":{\"code\":2,\"message\":\"boom\"}}",
+        ));
+    }
+    transport.push_response(json_response(&json!({ "data": [] })));
     let client = client(transport.clone()).with_retry(instant_retry(3));
 
-    let value = client.send_text("1", "hi").await.unwrap();
-    assert_eq!(value["messages"][0]["id"], "wamid.after-retry");
-    assert_eq!(transport.call_count(), 3);
+    let page = client
+        .list_templates(&meta_whatsapp::TemplateQuery::new("102290129340398"))
+        .await
+        .unwrap();
+    assert_eq!(page.data.len(), 0);
+    assert_eq!(transport.call_count(), 3, "a GET is idempotent");
 }
 
 #[tokio::test]
@@ -115,13 +142,16 @@ async fn the_last_error_is_returned_once_the_budget_is_spent() {
     }
     let client = client(transport.clone()).with_retry(instant_retry(2));
 
-    let err = client.send_text("1", "hi").await.unwrap_err();
+    let err = client
+        .list_templates(&meta_whatsapp::TemplateQuery::new("102290129340398"))
+        .await
+        .unwrap_err();
     match err {
         Error::Api {
             status, retryable, ..
         } => {
             assert_eq!(status, 503);
-            assert!(retryable);
+            assert!(retryable, "a read stays retryable for the caller");
         }
         other => panic!("unexpected {other:?}"),
     }
@@ -157,12 +187,9 @@ async fn client_errors_are_terminal_and_not_retried() {
 }
 
 #[tokio::test]
-async fn transport_failures_are_retried_only_when_retryable() {
+async fn transport_failures_are_classified_by_phase() {
     let retryable = MockTransport::new();
-    retryable.push(Reply::Failure {
-        message: "connection reset".into(),
-        retryable: true,
-    });
+    retryable.push(Reply::not_sent("connection refused"));
     retryable.push_response(accepted("wamid.1"));
     client(retryable.clone())
         .with_retry(instant_retry(2))
@@ -172,10 +199,7 @@ async fn transport_failures_are_retried_only_when_retryable() {
     assert_eq!(retryable.call_count(), 2);
 
     let terminal = MockTransport::new();
-    terminal.push(Reply::Failure {
-        message: "unsupported scheme".into(),
-        retryable: false,
-    });
+    terminal.push(Reply::terminal("unsupported scheme"));
     let err = client(terminal.clone())
         .with_retry(instant_retry(3))
         .send_text("1", "hi")
@@ -184,11 +208,23 @@ async fn transport_failures_are_retried_only_when_retryable() {
     assert!(matches!(
         err,
         Error::Transport {
-            retryable: false,
+            phase: TransportPhase::Terminal,
             ..
         }
     ));
     assert_eq!(terminal.call_count(), 1);
+
+    // Written, but the answer was lost: exactly one call, ambiguous.
+    let lost = MockTransport::new();
+    lost.push(Reply::after_write("timed out reading response"));
+    let err = client(lost.clone())
+        .with_retry(instant_retry(3))
+        .send_text("1", "hi")
+        .await
+        .unwrap_err();
+    assert!(err.is_ambiguous());
+    assert!(!err.is_retryable());
+    assert_eq!(lost.call_count(), 1, "the message may already exist");
 }
 
 #[tokio::test]
@@ -202,6 +238,7 @@ async fn retries_can_be_disabled() {
     assert!(err.is_ok());
     assert_eq!(transport.call_count(), 1);
 
+    // Even with retries off, a 5xx on a send reports the delivery risk.
     let failing = MockTransport::new();
     failing.push_response(response(500, &[], b"{}"));
     let err = client(failing.clone())
@@ -209,7 +246,13 @@ async fn retries_can_be_disabled() {
         .send_text("1", "hi")
         .await
         .unwrap_err();
-    assert!(matches!(err, Error::Api { status: 500, .. }));
+    assert!(matches!(
+        err,
+        Error::Ambiguous {
+            status: Some(500),
+            ..
+        }
+    ));
     assert_eq!(failing.call_count(), 1);
 }
 
