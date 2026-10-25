@@ -41,3 +41,9 @@ missing_docs = "deny"
 [lints.clippy]
 all = "warn"
 pedantic = "warn"
+
+[[example]]
+name = "send_text"
+# The example sends over the bundled reqwest transport, so it needs `http`;
+# without the feature Cargo would build a file that imports a gated type.
+required-features = ["http"]

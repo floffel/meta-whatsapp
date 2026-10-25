@@ -31,6 +31,25 @@ let image = ImageMessage::new(MediaRef::id("987654321")).caption("Speisekarte");
 client.send(&MessageRequest::new("4915112345678", image)).await?;
 ```
 
+## Examples
+
+Two runnable examples, both compiled in CI:
+
+```bash
+cargo run --example webhook     # verify and parse a signed payload, offline
+cargo run --example send_text   # send a text message over the reqwest transport
+```
+
+`webhook` needs nothing: it signs a fixture with a throwaway secret, verifies it,
+prints the inbound messages and statuses, and asserts that a tampered body *and*
+a replayed body are both rejected — the two failure modes a webhook endpoint has
+to get right.
+
+`send_text` reads `WHATSAPP_PHONE_NUMBER_ID`, `WHATSAPP_TOKEN` and `WHATSAPP_TO`.
+Without the credentials it prints the JSON body it would POST and exits, so the
+example builds and runs on a machine with no WhatsApp account, and the
+`Error::Ambiguous` arm shows what to do when a send's outcome is unknown.
+
 ## Delivery semantics
 
 Sending a message is **not** safely repeatable: the Cloud API has no idempotency

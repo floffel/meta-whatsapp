@@ -11,6 +11,10 @@ jobs:
           components: clippy, rustfmt
       - run: cargo fmt --check
       - run: cargo clippy --all-targets --all-features -- -D warnings
+      # `clippy --all-targets` compiles the examples anyway; this step makes
+      # them a named gate so a broken example fails under its own name.
+      - name: Examples build
+        run: cargo build --examples --all-features
       - run: cargo test --all-features
       - run: cargo test --no-default-features
       # A changelog nobody enforces rots: the version in the manifest must have
