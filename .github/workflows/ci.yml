@@ -13,6 +13,15 @@ jobs:
       - run: cargo clippy --all-targets --all-features -- -D warnings
       - run: cargo test --all-features
       - run: cargo test --no-default-features
+      # A changelog nobody enforces rots: the version in the manifest must have
+      # its section before the release workflow can ever see the tag.
+      - name: CHANGELOG has a section for this version
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+          if ! grep -Eq "^## \[$version\] " CHANGELOG.md; then
+            echo "::error::CHANGELOG.md has no '## [$version]' section"
+            exit 1
+          fi
       - run: cargo doc --no-deps
         env:
           RUSTDOCFLAGS: -D warnings

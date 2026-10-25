@@ -26,12 +26,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Tag matches Cargo.toml version
+      - name: Tag and changelog match Cargo.toml version
         run: |
           tag="${GITHUB_REF_NAME#v}"
           crate=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
           if [ "$tag" != "$crate" ]; then
             echo "::error::tag $tag does not match Cargo.toml version $crate"
+            exit 1
+          fi
+          if ! grep -Eq "^## \[$crate\] " CHANGELOG.md; then
+            echo "::error::CHANGELOG.md has no '## [$crate]' section for this release"
             exit 1
           fi
       # A version on crates.io is immutable: re-running a release for a version
