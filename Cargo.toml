@@ -1,6 +1,6 @@
 [package]
 name = "meta-whatsapp"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 rust-version = "1.89"
 license = "Apache-2.0 OR MIT"
@@ -32,7 +32,7 @@ tokio = { version = "1", default-features = false, features = ["time"], optional
 
 [dev-dependencies]
 proptest = "1"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "net", "io-util"] }
 
 [lints.rust]
 unsafe_code = "forbid"

@@ -2,10 +2,11 @@
 
 Typed client and webhook toolkit for the [WhatsApp Cloud API](https://developers.facebook.com/docs/whatsapp/cloud-api) (Meta Graph API).
 
-Two independent halves, both usable on their own:
+Three independent parts, all usable on their own:
 
 * **Webhook** — constant-time `X-Hub-Signature-256` verification, GET handshake, replay window, and the payload parsed into types (message events, statuses, unknown future events).
-* **Client** — every message family, media upload/download/delete, and template listing, with retries on 429/5xx.
+* **Client** — every message family, media upload/download/delete, template listing, and account administration (business profile, phone-number quality and limits, blocklist, webhook subscriptions).
+* **Account types** — `business`, `subscription` and `usage` modules behind that surface, including Meta's `X-Business-Use-Case-Usage` budget header.
 
 The HTTP layer sits behind the `Transport` trait: tests need no network, and you
 can plug in your own stack (or the bundled `reqwest` one behind the `http`
@@ -29,6 +30,46 @@ client.send_text("4915112345678", "Hallo!").await?;
 let image = ImageMessage::new(MediaRef::id("987654321")).caption("Speisekarte");
 client.send(&MessageRequest::new("4915112345678", image)).await?;
 ```
+
+## Delivery semantics
+
+Sending a message is **not** safely repeatable: the Cloud API has no idempotency
+key, so a second POST is a second message on the recipient's phone. The client
+therefore automates only the retries that cannot duplicate anything:
+
+| Failure | Non-idempotent (`POST` send/upload) | Idempotent (`GET`, `DELETE`) |
+| --- | --- | --- |
+| 429 rate limited | retried, honours `Retry-After` | retried, honours `Retry-After` |
+| DNS / connect / TLS failure (before the write) | retried | retried |
+| 5xx | **not retried** → `Error::Ambiguous` | retried with backoff |
+| Timeout or reset after the write | **not retried** → `Error::Ambiguous` | retried |
+| Other 4xx | terminal | terminal |
+
+`Error::Ambiguous` means *the message may or may not have been delivered*:
+`is_retryable()` is `false`, `is_ambiguous()` is `true`, `status()` carries the
+5xx when one arrived, and `source()` is the underlying Graph/transport error.
+Retrying it would duplicate the message; dropping it may lose one. That decision
+belongs to the caller, not to the library.
+
+The three delivery guarantees, in the usual vocabulary:
+
+* **at-most-once** — never retry an ambiguous send (safe against duplicates, a
+  message can be lost).
+* **at-least-once** — retry an ambiguous send anyway (no loss, possible
+  duplicates).
+* **ambiguous** — surface it and let a human/ledger decide, which is what the
+  default does.
+
+Because the API cannot deduplicate for you, carry your own key and use it on the
+receiving side: WhatsApp returns `biz_opaque_callback_data` on the status
+webhooks for exactly that (set it with
+`MessageRequest::biz_opaque_callback_data`), or keep your own outbox ledger with
+one row per send attempt. `mark_read` is treated as idempotent (marking read
+twice leaves the same state), so a 5xx there is retried.
+
+The retry decision is one pure function, `RetryPolicy::decide`, and the loop
+around it only sleeps: no sleeping, blocking or hidden retry lives in the
+library's data path. `RetryPolicy::delay` remains the pure backoff arithmetic.
 
 ## Messages
 
@@ -67,6 +108,52 @@ restricted to `[A-Za-z0-9_-]` so they cannot escape the URL path.
 `status`, `name`, `language`, `fields`). `TemplateList::has_next_page` tells you
 whether to follow `paging.next`.
 
+## Business account
+
+Account administration for the number the client is bound to:
+
+| Call | Endpoint | Returns |
+| --- | --- | --- |
+| `business_profile` | `GET /{phone_number_id}/whatsapp_business_profile` | `BusinessProfile` (about, address, description, e-mail, websites, vertical) |
+| `update_business_profile` | `POST /{phone_number_id}/whatsapp_business_profile` | `{"success": true}` |
+| `phone_number_info` | `GET /{phone_number_id}?fields=…` | `PhoneNumberInfo` (quality rating, messaging-limit tier, account mode, display-name and 2FA status) |
+| `phone_number_info_with` | same, explicit field list | same, but you choose the fields |
+| `blocked_users` | `GET /{phone_number_id}/block_users` | `BlockedUsersPage` (with paging) |
+| `block_users` | `POST /{phone_number_id}/block_users` | `BlockOutcome` (`added_users`) |
+| `unblock_users` | `DELETE /{phone_number_id}/block_users` (ids in the body) | `BlockOutcome` (`removed_users`) |
+
+Quality and limits are typed but permissive: `QualityRating` (GREEN/YELLOW/RED/NA)
+and `MessagingLimitTier` (TIER_50 … TIER_UNLIMITED) keep an unknown value as
+`Unknown(String)` instead of failing, and `PhoneNumberInfo::daily_contact_limit()`
+turns the tier into a number. `permits_broadcast()` is our own conservative
+policy (not RED, not SANDBOX), not a field Meta returns.
+
+## Rate-limit budget
+
+`send_with_usage` returns the parsed body *and* Meta's
+`X-Business-Use-Case-Usage` header as `BusinessUseCaseUsage` (call count, CPU and
+wall-clock budget, estimated time to regain access, per business and use case).
+Any `Response` exposes the same via `Response::business_use_case_usage()`.
+
+The header is optional and unparsable values yield `None` — telemetry never fails
+a send. Use it to slow down *before* a 429; it does not change delivery
+semantics.
+
+## Webhook subscriptions
+
+| Call | Endpoint |
+| --- | --- |
+| `webhook_subscriptions(waba_id)` | `GET /{waba_id}/subscribed_apps` |
+| `subscribe_webhooks(waba_id, config)` | `POST /{waba_id}/subscribed_apps` (`override_callback_uri`, `verify_token`) |
+| `unsubscribe_webhooks(waba_id)` | `DELETE /{waba_id}/subscribed_apps` |
+| `ensure_webhook_subscription(waba_id, app_id)` | list, then subscribe **only if** the app is missing |
+
+`ensure_webhook_subscription` is the safe thing to call on start-up and again on
+an error path: it never re-POSTs an existing subscription, and it reports
+`SubscriptionState::{AlreadySubscribed, Subscribed}` so you can log which
+happened. A 401 from the list is returned as is instead of attempting a write
+with a token the API just rejected.
+
 ## Webhook
 
 * Signature comparison uses `subtle::ConstantTimeEq` over the 32 HMAC bytes.
@@ -83,32 +170,63 @@ whether to follow `paging.next`.
 
 ## Resilience
 
-* 429 and 5xx are retried with exponential backoff, bounded by `RetryPolicy`
-  (default 3 attempts, 250 ms doubling to an 8 s ceiling).
-* `Retry-After` is honoured and clamped to `max_delay`.
-* 4xx, signature, validation and decoding errors are terminal.
+* Only 429 and pre-write connection failures are retried automatically; see
+  [Delivery semantics](#delivery-semantics).
+* Backoff is exponential, bounded by `RetryPolicy` (default 3 attempts, 250 ms
+  doubling to an 8 s ceiling); `Retry-After` is honoured and clamped to
+  `max_delay`.
 * Per-request timeout via `WhatsAppClient::with_timeout`; waits use
   `tokio::time::sleep` (cancellation safe). Without the `http` feature there is
   no timer to await, so retries happen immediately — bring your own pacing.
+* `ReqwestTransport` classifies `reqwest` failures by phase: `is_connect()` is
+  "before the write" (retryable), a timeout or body/decode error is "after the
+  write" (ambiguous for a send), and anything else is terminal.
+
+## Unverified against the provider docs
+
+Meta's published Cloud API description does not pin these down, so they are
+handled permissively instead of guessed at. Treat them as the parts most likely
+to need a patch release — `docs/contracts.md` records the sources:
+
+* **Business-profile envelope.** The reference shows the profile fields at the
+  top level and inside a `data` array, the OpenAPI example wraps them again in
+  `business_profile`. `BusinessProfile::parse` accepts all three shapes; only the
+  field names are certain.
+* **Phone-number node envelope.** The spec returns a flat object; the parser also
+  accepts `{"data": [{…}]}` in case a proxy or a future version wraps it.
+* **`subscribed_apps` entries.** The spec example wraps each app in
+  `whatsapp_business_api_data`, but not every documented example does; both parse.
+* **Field-level subscription.** There is no `subscribed_fields` parameter on the
+  WABA node — field selection lives on the app-level `/{app_id}/subscriptions`
+  endpoint, which this crate does not implement. `subscribe_webhooks` covers the
+  WABA-level subscription only.
+* **Re-subscribe on 401.** Nothing in the docs says a 401 implies a lost
+  subscription, so `ensure_webhook_subscription` re-reads instead of
+  re-subscribing blindly.
+* **Usage-header counters.** The field set comes from the header example; unknown
+  counters are ignored, not typed.
+* **Blocklist batch size.** No documented maximum, so none is enforced beyond the
+  per-number validation.
 
 ## Deliberately out of scope
 
 These are Cloud API surfaces this crate does not implement. They are listed so
 the gap is a decision, not an oversight:
 
-* **Business profile, phone-number info, quality/messaging limits, blocklist** —
-  account administration, not messaging. Separate concern from a send/receive client.
-* **Webhook subscription management** (`subscribed_fields` GET/POST, re-subscribe
-  on 401) — deployment-time configuration; treat it as infrastructure.
 * **Catalog / product / order / address messages** — commerce-specific payloads
   with their own schema churn; `MessageBody` stays `#[non_exhaustive]` so they can
   be added without a breaking release.
 * **Flow data-exchange endpoints** — the inbound `nfm_reply` payload is passed
   through raw (`InteractiveReply::nfm_reply`); decrypting/serving flows is a server concern.
-* **Rate-limit budget tracking** beyond `Retry-After` (Meta's
-  `X-Business-Use-Case-Usage` header is not parsed).
-* **`cargo-fuzz` targets and a coverage job** — property tests cover the parsers
-  and renderers; libFuzzer harnesses and a tarpaulin gate are not wired into CI yet.
+* **App-level webhook field subscription** (`/{app_id}/subscriptions`) and
+  registering the callback URL itself — deployment-time configuration of the Meta
+  app, not of a business account.
+* **WABA-level phone-number listing / onboarding** (`GET|POST /{waba_id}/phone_numbers`,
+  `register`, `request_code`) — number onboarding is a one-time operational step;
+  the per-number quality and limits *are* covered above.
+* **`cargo-fuzz` targets and a CI coverage job** — property tests cover the
+  parsers and renderers, and coverage is measured locally (see below), but
+  libFuzzer harnesses and a threshold gate are not wired into CI yet.
 
 ## Testing
 
@@ -117,19 +235,28 @@ cargo test                          # unit + integration + doctests, no network
 cargo test --no-default-features    # same, without reqwest/tokio
 cargo clippy --all-targets --all-features -- -D warnings
 cargo doc --no-deps
+cargo deny check
+cargo llvm-cov --all-features --summary-only   # 96.4 % lines
 ```
 
-The suite has three layers:
+The suite has four layers:
 
-* **Unit** — multipart encoding, Retry-After parsing, error mapping.
+* **Unit** — multipart encoding, Retry-After parsing, error mapping, retry
+  classification, response-envelope unwrapping.
 * **Integration** (`tests/`) — a recording `Transport` asserts method, path,
   bearer token, timeout and exact JSON body per message type; edge cases include
   empty text, the 4096-byte boundary, invalid media ids, malformed signatures,
-  truncated JSON, duplicate keys, unknown event types and a 32-task concurrency test.
+  truncated JSON, duplicate keys, unknown event types and 32-task concurrency
+  tests. `tests/delivery.rs` pins the retry contract call-by-call;
+  `tests/account.rs` covers profile/quality/limits/blocklist/subscriptions/usage;
+  `tests/reqwest_transport.rs` drives the bundled transport against a local
+  socket and a refused connection.
 * **Property** (`proptest`) — webhook parsing never panics over arbitrary JSON,
   sign/verify round-trips for arbitrary secrets and bodies, text acceptance
   matches the documented boundary, backoff stays bounded, queries stay
-  percent-encoded.
+  percent-encoded, and "no non-idempotent request is retried after a 5xx" holds
+  for every status, budget and attempt count.
+* **Doctest** — every public item has a runnable example (403 doctests).
 
 ## License
 
