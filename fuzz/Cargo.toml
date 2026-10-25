@@ -1,0 +1,53 @@
+[package]
+name = "meta-whatsapp-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+serde_json = "1"
+
+[dependencies.meta-whatsapp]
+path = ".."
+# The parsers are feature-free on purpose: fuzzing the pure core means the
+# harness needs no HTTP stack and runs fast.
+default-features = false
+
+[[bin]]
+name = "webhook_payload"
+path = "fuzz_targets/webhook_payload.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "webhook_signature"
+path = "fuzz_targets/webhook_signature.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "template_payload"
+path = "fuzz_targets/template_payload.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "account_payload"
+path = "fuzz_targets/account_payload.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "header_values"
+path = "fuzz_targets/header_values.rs"
+test = false
+doc = false
+bench = false

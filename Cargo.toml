@@ -10,7 +10,7 @@ documentation = "https://docs.rs/meta-whatsapp"
 keywords = ["whatsapp", "meta", "cloud-api", "webhook", "graph-api"]
 categories = ["api-bindings", "web-programming"]
 readme = "README.md"
-exclude = [".github/**", "deny.toml"]
+exclude = [".github/**", "deny.toml", "fuzz/**"]
 
 [package.metadata.docs.rs]
 all-features = true

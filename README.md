@@ -230,9 +230,6 @@ the gap is a decision, not an oversight:
 * **WABA-level phone-number listing / onboarding** (`GET|POST /{waba_id}/phone_numbers`,
   `register`, `request_code`) — number onboarding is a one-time operational step;
   the per-number quality and limits *are* covered above.
-* **`cargo-fuzz` targets and a CI coverage job** — property tests cover the
-  parsers and renderers, and coverage is measured locally (see below), but
-  libFuzzer harnesses and a threshold gate are not wired into CI yet.
 
 ## Testing
 
@@ -242,10 +239,11 @@ cargo test --no-default-features    # same, without reqwest/tokio
 cargo clippy --all-targets --all-features -- -D warnings
 cargo doc --no-deps
 cargo deny check
-cargo llvm-cov --all-features --summary-only   # 96.4 % lines
+cargo llvm-cov --all-features --summary-only   # 96.3 % lines, gate at 95 %
+cargo fuzz run webhook_payload      # nightly; one target per parser, see below
 ```
 
-The suite has four layers:
+The suite has five layers:
 
 * **Unit** — multipart encoding, Retry-After parsing, error mapping, retry
   classification, response-envelope unwrapping.
@@ -263,6 +261,23 @@ The suite has four layers:
   percent-encoded, and "no non-idempotent request is retried after a 5xx" holds
   for every status, budget and attempt count.
 * **Doctest** — every public item has a runnable example (403 doctests).
+* **Fuzz** (`fuzz/`, nightly) — one libFuzzer target per parser, each pinning the
+  invariant it protects instead of only "does not panic":
+  * `webhook_payload` — arbitrary JSON through the permissive parser; a key the
+    crate does not model must come back out of `extra`, not be dropped.
+  * `webhook_signature` — a header verifies only if it is byte-identical to the
+    genuine HMAC, and no header shape panics the verifier.
+  * `template_payload` — list parsing plus the query string: no raw space, `#`,
+    tab or newline may escape the percent-encoding.
+  * `account_payload` — profile, phone-number, blocklist, block-result and
+    subscription parsers, including the `Display` of every typed error.
+  * `header_values` — `Retry-After`, the usage-budget header, and the round trip
+    of the two permissive string enums through their wire spelling.
+
+  The seeds in `fuzz/corpus/` are real payloads; the signature seed carries a
+  genuine HMAC for the fuzz secret, so the parser is reached on the first
+  iteration. CI builds all five targets and runs 5 000 iterations each on the
+  committed corpus.
 
 ## License
 
