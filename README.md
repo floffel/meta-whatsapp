@@ -279,6 +279,26 @@ The suite has five layers:
   iteration. CI builds all five targets and runs 5 000 iterations each on the
   committed corpus.
 
+## Versioning and MSRV
+
+[Semantic Versioning](https://semver.org/spec/v2.0.0.html), with the 0.x caveat
+stated rather than implied: while the major version is 0, a **minor** bump
+(`0.1` → `0.2`) may carry a breaking change, and a **patch** bump
+(`0.1.2` → `0.1.3`) never does. `#[non_exhaustive]` on the error and payload
+enums plus additive message families mean most provider-side additions land in a
+patch release; a deliberate break waits for the next minor version.
+
+* Every release is tagged `v<version>`, and the tag has to equal the version in
+  `Cargo.toml` — the release workflow refuses to publish a mismatch.
+* [CHANGELOG.md](CHANGELOG.md) has one section per released version, and CI fails
+  when the manifest's version has no section.
+* **MSRV is Rust 1.89**, declared as `rust-version` in `Cargo.toml`. Raising it is
+  a minor-version change and is named in the changelog entry.
+* docs.rs builds with `all-features = true`.
+* A fix to a shape listed as *unverified* in `docs/contracts.md` (see
+  [Unverified against the provider docs](#unverified-against-the-provider-docs))
+  is a patch release: the earlier version was guessing, not promising.
+
 ## License
 
 Licensed under either of Apache-2.0 or MIT at your option.
