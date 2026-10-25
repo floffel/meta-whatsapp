@@ -9,6 +9,19 @@ of the README.
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-10-25
+
+### Added
+- `examples/webhook.rs` — verifies a signed payload and parses it with no
+  network and no credentials (`cargo run --example webhook`); asserts that a
+  tampered body and a replayed body are both rejected.
+- `examples/send_text.rs` — sends over `ReqwestTransport`, shows the
+  `Error::Ambiguous` arm, and prints the rendered request instead of sending
+  when the credentials are absent, so it runs without an account.
+- README › Examples, and a CI step `Examples build` that compiles both.
+
+No API change.
+
 ## [0.1.3] - 2026-10-25
 
 ### Added
@@ -80,7 +93,8 @@ No API change.
   defined, so a missing environment variable must not become an auth bypass).
 - `Debug` for the client redacts the access token.
 
-[Unreleased]: https://github.com/floffel/meta-whatsapp/compare/v0.1.3...HEAD
+[Unreleased]: https://github.com/floffel/meta-whatsapp/compare/v0.1.4...HEAD
+[0.1.4]: https://github.com/floffel/meta-whatsapp/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/floffel/meta-whatsapp/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/floffel/meta-whatsapp/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/floffel/meta-whatsapp/compare/v0.1.0...v0.1.1
