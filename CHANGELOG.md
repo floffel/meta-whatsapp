@@ -9,6 +9,19 @@ of the README.
 
 ## [Unreleased]
 
+### Changed
+- The retry module documents why its backoff curve stays local: `backoff` 0.4
+  (the crate the audit named) has had no release since 2021-12 and needs
+  `&mut self`; `backon` 1.6 computes in `f32` seconds (a 100 ms base yields
+  200.000 003 ms) and indexes its curve by walking it; `retry-policies` 0.5
+  answers with a `SystemTime` and takes no `Retry-After`. The arithmetic itself
+  is unchanged, and its exactness is now pinned by tests.
+
+### Added
+- `retry` unit tests for the boundary the curve has to survive: exact doubling
+  from an arbitrary base, a ceiling below the base delay, a zero base delay, and
+  a `u32::MAX` budget that must stay exact and cheap.
+
 ## [0.1.4] - 2026-10-25
 
 ### Added

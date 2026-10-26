@@ -88,7 +88,11 @@ twice leaves the same state), so a 5xx there is retried.
 
 The retry decision is one pure function, `RetryPolicy::decide`, and the loop
 around it only sleeps: no sleeping, blocking or hidden retry lives in the
-library's data path. `RetryPolicy::delay` remains the pure backoff arithmetic.
+library's data path. `RetryPolicy::delay` remains the pure backoff arithmetic —
+exact integer shifts on `Duration`, no float curve. Issue #5 asked for that
+arithmetic to be delegated to a retry crate; the three candidates (`backoff`,
+`backon`, `retry-policies`) were measured and each loses something this crate
+needs, so the reasons live in the `retry` module docs next to the code.
 
 ## Messages
 
@@ -191,9 +195,9 @@ with a token the API just rejected.
 
 * Only 429 and pre-write connection failures are retried automatically; see
   [Delivery semantics](#delivery-semantics).
-* Backoff is exponential, bounded by `RetryPolicy` (default 3 attempts, 250 ms
-  doubling to an 8 s ceiling); `Retry-After` is honoured and clamped to
-  `max_delay`.
+* Backoff is exponential and exact, bounded by `RetryPolicy` (default 3
+  attempts, 250 ms doubling to an 8 s ceiling); `Retry-After` is honoured and
+  clamped to `max_delay`.
 * Per-request timeout via `WhatsAppClient::with_timeout`; waits use
   `tokio::time::sleep` (cancellation safe). Without the `http` feature there is
   no timer to await, so retries happen immediately — bring your own pacing.

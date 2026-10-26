@@ -5,6 +5,27 @@
 //! loop in [`crate::client`] only sleeps and re-sends, so the interesting
 //! arithmetic and the delivery contract are testable — including property
 //! tests that pin "no non-idempotent request is retried after a 5xx".
+//!
+//! # Why the curve is local
+//!
+//! The audit that produced this module's issues asked for the backoff
+//! mechanism to be delegated (issue #5). The three candidate crates were
+//! evaluated and each one loses something this crate needs:
+//!
+//! * `backoff` 0.4 — the crate the audit named — has had no release since
+//!   2021-12, and `ExponentialBackoff::next_backoff` takes `&mut self`, so a
+//!   pure `&self` decision function cannot hold one.
+//! * `backon` 1.6 computes the curve in `f32` seconds: a 100 ms base yields
+//!   `100 ms, 200.000_003 ms, 400.000_006 ms`, and asking for entry `n` walks
+//!   the iterator `n` times, which a `u32::MAX` budget makes unbounded work.
+//! * `retry-policies` 0.5 answers with a `SystemTime`, has no `Retry-After`
+//!   input at all, and its exponential is the only thing it offers.
+//!
+//! What remains below is integer arithmetic on `Duration` (exact by
+//! construction), the `Retry-After` precedence, and the idempotency gate — the
+//! three things no retry crate models together. The parts that *are* generic —
+//! the classifier and the budget — are pinned by unit and property tests
+//! instead of by a dependency.
 
 use std::time::Duration;
 
@@ -323,6 +344,10 @@ impl RetryPolicy {
     /// `attempts_failed` counts completed attempts: `1` means the first try
     /// just failed.
     ///
+    /// The backoff is exact: `base_delay` shifted left by `attempts_failed - 1`,
+    /// capped at [`RetryPolicy::max_delay`]. There is no float math in the path,
+    /// so a 100 ms base yields exactly 100, 200, 400 ms — not 200.000_003.
+    ///
     /// ```
     /// use std::time::Duration;
     /// use meta_whatsapp::RetryPolicy;
@@ -476,6 +501,58 @@ mod tests {
         assert_eq!(
             policy.decide(Attempt::Terminal, Repeatability::Idempotent, 1),
             Action::Surface
+        );
+    }
+
+    #[test]
+    fn the_curve_doubles_exactly_from_an_arbitrary_base_and_saturates() {
+        let policy = RetryPolicy::new(10)
+            .with_base_delay(Duration::from_millis(100))
+            .with_max_delay(Duration::from_millis(500));
+        let waits: Vec<_> = (1..=5).map(|failed| policy.delay(failed, None)).collect();
+        assert_eq!(
+            waits,
+            vec![
+                Some(Duration::from_millis(100)),
+                Some(Duration::from_millis(200)),
+                Some(Duration::from_millis(400)),
+                Some(Duration::from_millis(500)),
+                Some(Duration::from_millis(500)),
+            ]
+        );
+        // Exhaustion is the budget, not the curve: `max_attempts` attempts means
+        // `max_attempts - 1` retries.
+        assert_eq!(policy.delay(10, None), None);
+        assert_eq!(policy.delay(11, None), None);
+    }
+
+    #[test]
+    fn a_ceiling_below_the_base_delay_still_bounds_the_first_wait() {
+        let policy = RetryPolicy::new(4)
+            .with_base_delay(Duration::from_secs(5))
+            .with_max_delay(Duration::from_millis(10));
+        for failed in 1..4 {
+            assert_eq!(policy.delay(failed, None), Some(Duration::from_millis(10)));
+        }
+    }
+
+    #[test]
+    fn a_zero_base_delay_yields_zero_waits() {
+        let policy = RetryPolicy::new(3).with_base_delay(Duration::ZERO);
+        assert_eq!(policy.delay(1, None), Some(Duration::ZERO));
+        assert_eq!(policy.delay(2, None), Some(Duration::ZERO));
+    }
+
+    #[test]
+    fn an_enormous_budget_stays_exact_and_cheap() {
+        // The exponent is clamped, so a 4-billion-attempt budget costs one
+        // shift: the wait saturates at the ceiling instead of overflowing.
+        let policy = RetryPolicy::new(u32::MAX)
+            .with_base_delay(Duration::from_millis(1))
+            .with_max_delay(Duration::from_secs(1));
+        assert_eq!(
+            policy.delay(u32::MAX - 1, None),
+            Some(Duration::from_secs(1))
         );
     }
 

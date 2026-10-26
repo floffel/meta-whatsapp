@@ -140,6 +140,68 @@ async fn the_retry_after_header_sets_the_wait() {
     );
 }
 
+/// The wrapper the client hands the caller must classify through its cause:
+/// a 5xx stays a server error (ambiguous for a send), a 429 stays a rate limit
+/// (safe to repeat), and neither is mistaken for a terminal failure.
+#[test]
+fn a_wrapped_error_is_classified_through_its_cause() {
+    let server_error = Error::Api {
+        code: 2,
+        status: 503,
+        message: "unavailable".into(),
+        retry_after: Some(Duration::from_secs(1)),
+        retryable: true,
+    };
+    let wrapped = Error::ambiguous("POST /messages", Some(503), server_error);
+    assert_eq!(
+        Attempt::classify(&wrapped),
+        Attempt::ServerError {
+            retry_after: Some(Duration::from_secs(1))
+        }
+    );
+
+    let rate_limited = Error::Api {
+        code: 4,
+        status: 429,
+        message: "slow down".into(),
+        retry_after: None,
+        retryable: true,
+    };
+    let wrapped = Error::ambiguous("POST /messages", Some(429), rate_limited);
+    assert_eq!(
+        Attempt::classify(&wrapped),
+        Attempt::RateLimited { retry_after: None }
+    );
+
+    // And the wrapper never turns a terminal status into a retryable one.
+    let terminal = Error::Api {
+        code: 100,
+        status: 400,
+        message: "bad request".into(),
+        retry_after: None,
+        retryable: false,
+    };
+    let wrapped = Error::ambiguous("POST /messages", Some(400), terminal);
+    assert_eq!(Attempt::classify(&wrapped), Attempt::Terminal);
+}
+
+/// `without_retry_after` is the escape hatch for a proxy that sends a hint we do
+/// not trust: the curve decides, not the header — in both directions.
+#[test]
+fn without_retry_after_ignores_the_hint_in_both_directions() {
+    let policy = RetryPolicy::default().without_retry_after();
+    assert_eq!(
+        policy.delay(1, Some(Duration::from_secs(30))),
+        Some(Duration::from_millis(250)),
+        "a long hint must not stretch the wait"
+    );
+    assert_eq!(
+        policy.delay(2, Some(Duration::from_millis(1))),
+        Some(Duration::from_millis(500)),
+        "a short hint must not shorten the wait"
+    );
+}
+
 #[tokio::test]
 async fn a_lost_response_after_the_write_is_ambiguous_not_retried() {
     let transport = MockTransport::new();
