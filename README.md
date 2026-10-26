@@ -5,7 +5,7 @@ Typed client and webhook toolkit for the [WhatsApp Cloud API](https://developers
 Three independent parts, all usable on their own:
 
 * **Webhook** — constant-time `X-Hub-Signature-256` verification, GET handshake, replay window, and the payload parsed into types (message events, statuses, unknown future events).
-* **Client** — every message family, media upload/download/delete, template listing, and account administration (business profile, phone-number quality and limits, blocklist, webhook subscriptions).
+* **Client** — every message family, media upload/download/delete, template listing, delivery status of a sent message, and account administration (business profile, phone-number quality and limits, blocklist, webhook subscriptions).
 * **Account types** — `business`, `subscription` and `usage` modules behind that surface, including Meta's `X-Business-Use-Case-Usage` budget header.
 
 The HTTP layer sits behind the `Transport` trait: tests need no network, and you
@@ -111,6 +111,45 @@ validates before rendering, so an invalid message never reaches the network.
 
 Envelope-level features: reply context (`context.message_id`),
 `biz_opaque_callback_data`, and `recipient_type`.
+
+## Delivery status
+
+`message_status(wamid)` reads the *current* state of one message you sent — the
+Cloud API's *Read a Message* endpoint, `GET /{phone_number_id}?id={wamid}`:
+
+```rust
+let status = client.message_status("wamid.HBgLMTU3MjkwMDg0NTU5NRMVAgEYGBQyQTc=").await?;
+
+if let Some(error) = status.first_error() {
+    eprintln!("{}: {} — not delivered", error.code, error.title);
+}
+match status.status {
+    DeliveryStatus::Read => println!("read at {}", status.timestamp),
+    DeliveryStatus::Delivered => println!("delivered, not read yet"),
+    DeliveryStatus::Sent => println!("accepted, not delivered yet"),
+    DeliveryStatus::Failed => {}
+    other => println!("a status this crate does not model: {}", other.as_str()),
+}
+```
+
+This is the pull-side complement of the `statuses` webhook push: it recovers a
+lost webhook, and it lets a service run without a callback at all. The webhook
+still owns the timeline — read on demand, do not poll.
+
+* `DeliveryStatus` is `sent` / `delivered` / `read` / `failed`, plus
+  `Unknown(raw)` for any word Meta adds later, so a new status cannot break a
+  deployment.
+* `MessageStatus::errors` carries the failure details of a `failed` message
+  (`StatusError`: code, title, message, `error_data`).
+* It is a `GET`, so 429 and 5xx are retried like every other read; a 4xx is
+  terminal and never `Error::Ambiguous`.
+* The wamid is validated *before* the request is built — non-empty, at most
+  `MAX_WAMID_LEN` bytes of `A-Za-z0-9 - _ . : + / =`, and no leading, trailing
+  or doubled `.` — and it is percent-encoded into the query value. A malformed
+  id is `Error::Validation` and never leaves the process.
+* `MessageStatus::parse_all` reads a whole body yourself if you want every
+  entry; `message_status` answers the one you asked about, and a body with no
+  entries is `Error::Payload`, not an empty status.
 
 ## Media
 
@@ -236,6 +275,10 @@ to need a patch release — `docs/contracts.md` records the sources:
   counters are ignored, not typed.
 * **Blocklist batch size.** No documented maximum, so none is enforced beyond the
   per-number validation.
+* **wamid format.** The reference gives neither a grammar nor a length for a
+  message id. `validate_wamid` therefore accepts the alphabet real ids use
+  (base64 plus the `wamid.` separator) and caps the id at 256 bytes; a genuine
+  id longer than that would be refused until `MAX_WAMID_LEN` is raised.
 
 ## Tracked gaps
 
@@ -287,7 +330,12 @@ The suite has five layers:
   matches the documented boundary, backoff stays bounded, queries stay
   percent-encoded, and "no non-idempotent request is retried after a 5xx" holds
   for every status, budget and attempt count.
-* **Doctest** — every public item has a runnable example (403 doctests).
+  Delivery-status parsing is included: wamid acceptance matches its documented
+  rules exactly, `DeliveryStatus` round-trips through its wire spelling with an
+  unknown word preserved verbatim, any JSON shape for `status` decodes, and
+  `MessageStatus::parse_all` only ever reports a structural one — a body that
+  cannot carry a status, or an entry whose shape is unreadable.
+* **Doctest** — every public item has a runnable example (417 doctests).
 * **Fuzz** (`fuzz/`, nightly) — one libFuzzer target per parser, each pinning the
   invariant it protects instead of only "does not panic":
   * `webhook_payload` — arbitrary JSON through the permissive parser; a key the

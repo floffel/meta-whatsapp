@@ -1045,7 +1045,7 @@ pub struct TemplateSummary {
     pub components: Vec<Value>,
 }
 
-fn percent_encode(value: &str) -> String {
+pub(crate) fn percent_encode(value: &str) -> String {
     use std::fmt::Write as _;
 
     let mut out = String::with_capacity(value.len());

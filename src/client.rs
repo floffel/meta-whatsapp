@@ -40,10 +40,11 @@ use crate::error::{Error, Result};
 use crate::media::{parse_retry_after, validate_media_id, MediaBytes, MediaInfo, MediaUpload};
 use crate::message::{MessageRequest, TextMessage};
 use crate::retry::{Action, Attempt, Repeatability, RetryPolicy};
+use crate::status::{validate_wamid, MessageStatus};
 use crate::subscription::{
     validate_waba_id, SubscriptionConfig, SubscriptionState, WebhookSubscriptions,
 };
-use crate::template::{TemplateList, TemplateQuery};
+use crate::template::{percent_encode, TemplateList, TemplateQuery};
 use crate::transport::{Request, Response, Transport};
 use crate::usage::BusinessUseCaseUsage;
 
@@ -287,6 +288,36 @@ impl<T: Transport> WhatsAppClient<T> {
         self.url(&format!("{}/messages", self.phone_number_id))
     }
 
+    /// The *Read a Message* endpoint for one wamid: the phone-number node with
+    /// the id in the query string.
+    ///
+    /// The wamid is percent-encoded, so the base64 payload (`+`, `/`, `=`)
+    /// survives intact as a query value. Like [`WhatsAppClient::media_url`]
+    /// this helper does not validate — [`WhatsAppClient::message_status`] and
+    /// [`crate::status::validate_wamid`] do.
+    ///
+    /// ```
+    /// # use meta_whatsapp::{Result, Transport, WhatsAppClient, transport::{Request, Response}};
+    /// # struct Mock;
+    /// # impl Transport for Mock {
+    /// #     async fn execute(&self, _: Request<'_>) -> Result<Response> {
+    /// #         Ok(Response::new(200, std::iter::empty(), b"{}".to_vec()))
+    /// #     }
+    /// # }
+    /// assert_eq!(
+    ///     WhatsAppClient::new("1", "t", Mock).message_status_url("wamid.HBgLMTU="),
+    ///     "https://graph.facebook.com/v21.0/1?id=wamid.HBgLMTU%3D&messaging_product=whatsapp"
+    /// );
+    /// ```
+    #[must_use]
+    pub fn message_status_url(&self, wamid: &str) -> String {
+        format!(
+            "{}?id={}&messaging_product=whatsapp",
+            self.phone_number_url(),
+            percent_encode(wamid)
+        )
+    }
+
     /// The media endpoint for one media id. Does not validate the id; the
     /// download and delete methods do.
     ///
@@ -486,6 +517,54 @@ impl<T: Transport> WhatsAppClient<T> {
             )
             .await?;
         response.json()
+    }
+
+    /// Reads the current delivery status of a message you sent.
+    ///
+    /// This is the pull-side complement of the `statuses` webhook push: it
+    /// answers `sent`, `delivered`, `read` or `failed` for one wamid, which is
+    /// how you recover a lost webhook or run without a callback at all. The
+    /// webhook still owns the timeline — poll this sparingly.
+    ///
+    /// It is a `GET`, so it is retried on 429 and 5xx like every other read
+    /// ([`RetryPolicy::decide`]); asking twice cannot change anything.
+    ///
+    /// ```
+    /// # use meta_whatsapp::{DeliveryStatus, Result, Transport, WhatsAppClient, transport::{Request, Response}};
+    /// # struct Mock;
+    /// # impl Transport for Mock {
+    /// #     async fn execute(&self, request: Request<'_>) -> Result<Response> {
+    /// #         assert!(request.url.ends_with("?id=wamid.1&messaging_product=whatsapp"));
+    /// #         Ok(Response::new(
+    /// #             200,
+    /// #             std::iter::empty(),
+    /// #             br#"{"messages":[{"id":"wamid.1","status":"delivered",
+    /// #                 "timestamp":"1729600000","recipient_id":"4915112345678"}]}"#.to_vec(),
+    /// #         ))
+    /// #     }
+    /// # }
+    /// # async fn demo() -> Result<()> {
+    /// let client = WhatsAppClient::new("1", "t", Mock);
+    /// let status = client.message_status("wamid.1").await?;
+    /// assert_eq!(status.status, DeliveryStatus::Delivered);
+    /// assert_eq!(status.recipient_id, "4915112345678");
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for a malformed wamid — empty, longer than
+    /// [`MAX_WAMID_LEN`](crate::MAX_WAMID_LEN), or holding whitespace, NUL or
+    /// query metacharacters — raised *before* a request is built. Then
+    /// transport and Graph API errors, then [`Error::Payload`] when the body
+    /// carries no message entry at all and [`Error::Json`] when the body is not
+    /// JSON or an entry cannot be read.
+    pub async fn message_status(&self, wamid: &str) -> Result<MessageStatus> {
+        validate_wamid(wamid)?;
+        let url = self.message_status_url(wamid);
+        let response = self.execute(Request::get(&url, &self.token)).await?;
+        MessageStatus::parse(&response.json()?)
     }
 
     /// Uploads media and returns the id to reference from messages.
