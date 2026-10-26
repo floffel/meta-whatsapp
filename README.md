@@ -237,22 +237,26 @@ to need a patch release — `docs/contracts.md` records the sources:
 * **Blocklist batch size.** No documented maximum, so none is enforced beyond the
   per-number validation.
 
-## Deliberately out of scope
+## Tracked gaps
 
-These are Cloud API surfaces this crate does not implement. They are listed so
-the gap is a decision, not an oversight:
+A Cloud API surface this crate does not implement is an issue, not an exclusion.
+The list below is the shortcut; the issue is the contract, and an entry leaves
+this section when its issue closes.
 
-* **Catalog / product / order / address messages** — commerce-specific payloads
-  with their own schema churn; `MessageBody` stays `#[non_exhaustive]` so they can
-  be added without a breaking release.
-* **Flow data-exchange endpoints** — the inbound `nfm_reply` payload is passed
-  through raw (`InteractiveReply::nfm_reply`); decrypting/serving flows is a server concern.
+* **Catalog / product / order / address messages** — issue #7. Commerce
+  payloads with their own schema churn; `MessageBody` stays `#[non_exhaustive]`
+  so they can land without a breaking release.
+* **Flow data-exchange endpoints** — issue #8. Until then the inbound
+  `nfm_reply` payload is passed through raw (`InteractiveReply::nfm_reply`);
+  decrypting and serving flows is a server concern, not a client one.
 * **App-level webhook field subscription** (`/{app_id}/subscriptions`) and
-  registering the callback URL itself — deployment-time configuration of the Meta
-  app, not of a business account.
+  registering the callback URL itself — issue #9.
 * **WABA-level phone-number listing / onboarding** (`GET|POST /{waba_id}/phone_numbers`,
-  `register`, `request_code`) — number onboarding is a one-time operational step;
-  the per-number quality and limits *are* covered above.
+  `register`, `request_code`) — issue #9. The per-number quality and limits
+  *are* covered above.
+
+The only exclusion that does not need an issue is a surface the provider does
+not offer, or has deprecated — and then the README says which, with a link.
 
 ## Testing
 

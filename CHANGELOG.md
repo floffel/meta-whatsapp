@@ -16,6 +16,9 @@ of the README.
   200.000 003 ms) and indexes its curve by walking it; `retry-policies` 0.5
   answers with a `SystemTime` and takes no `Retry-After`. The arithmetic itself
   is unchanged, and its exactness is now pinned by tests.
+- README: "Deliberately out of scope" became "Tracked gaps". Every unimplemented
+  surface already had an issue (#7, #8, #9), so the section now points at them
+  instead of presenting them as decisions.
 
 ### Added
 - `retry` unit tests for the boundary the curve has to survive: exact doubling
