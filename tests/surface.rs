@@ -14,6 +14,7 @@ use meta_whatsapp::business::{
     PROFILE_WEBSITE_MAX_CHARS,
 };
 use meta_whatsapp::media::{MediaBytes, MediaInfo, MediaRef, MediaUpload, MAX_LINK_LEN};
+use meta_whatsapp::status::DeliveryStatus;
 use meta_whatsapp::subscription::{SubscriptionConfig, SubscriptionState, WebhookSubscriptions};
 use meta_whatsapp::template::{
     TemplateButtonType, TemplateComponent, TemplateLanguage, TemplateMediaKind, TemplateParameter,
@@ -86,6 +87,20 @@ fn enum_spellings_cover_every_variant() {
     assert_eq!(TemplateButtonType::CopyCode.as_str(), "copy_code");
     assert_eq!(FlowMode::Draft.as_str(), "draft");
     assert_eq!(FlowMode::Published.as_str(), "published");
+    assert_eq!(DeliveryStatus::Sent.as_str(), "sent");
+    assert_eq!(DeliveryStatus::Delivered.as_str(), "delivered");
+    assert_eq!(DeliveryStatus::Read.as_str(), "read");
+    assert_eq!(DeliveryStatus::Failed.as_str(), "failed");
+    assert_eq!(
+        DeliveryStatus::Unknown("played".into()).as_str(),
+        "played",
+        "an unknown status keeps its raw spelling"
+    );
+    assert_eq!(
+        DeliveryStatus::default(),
+        DeliveryStatus::Unknown(String::new()),
+        "the default is the empty unknown, never a plausible status"
+    );
     assert!(matches!(
         FlowAction::navigate("screen"),
         FlowAction::Navigate { .. }

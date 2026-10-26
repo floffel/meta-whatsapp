@@ -17,6 +17,7 @@ Secondary sources — the developer reference pages the spec links to:
 
 * Cloud API overview: `https://developers.facebook.com/docs/whatsapp/cloud-api`
 * Webhooks / subscription setup: `https://developers.facebook.com/docs/whatsapp/cloud-api/guides/set-up-webhooks`
+* Send / read a message: `https://developers.facebook.com/docs/whatsapp/cloud-api/reference/messages`
 * Block users: `https://developers.facebook.com/docs/business-messaging/whatsapp/block-users`
 * Quality rating background: `https://www.facebook.com/business/help/896873687365001`
 
@@ -32,6 +33,7 @@ Secondary sources — the developer reference pages the spec links to:
 | `business_profile` | `GET /{phone-number-id}/whatsapp_business_profile` | `/{Version}/{Phone-Number-ID}/whatsapp_business_profile` |
 | `update_business_profile` | `POST /{phone-number-id}/whatsapp_business_profile` | same |
 | `phone_number_info`, `phone_number_info_with` | `GET /{phone-number-id}?fields=…` | `/{Version}/{Phone-Number-ID}` |
+| `message_status` | `GET /{phone-number-id}?id={wamid}` | `/{Version}/{Phone-Number-ID}` |
 | `blocked_users` | `GET /{phone-number-id}/block_users` | `/{Version}/{Phone-Number-ID}/block_users` |
 | `block_users` | `POST /{phone-number-id}/block_users` | same |
 | `unblock_users` | `DELETE /{phone-number-id}/block_users` | same |
@@ -52,6 +54,7 @@ Secondary sources — the developer reference pages the spec links to:
 | `WebhookSubscriptions` / `SubscribedApp` | `SubscribedAppsResponse`, `SubscribedApp` | Each entry may wrap the app in `whatsapp_business_api_data` (spec example) — both parse. |
 | `SubscriptionConfig` | `SubscriptionRequest` | `override_callback_uri`, `verify_token`. |
 | `BusinessUseCaseUsage` / `UseCaseUsage` | header `x-business-use-case-usage` | Header value is a JSON object keyed by business id, each value an array of `{type, call_count, total_cputime, total_time, estimated_time_to_regain_access}`. |
+| `MessageStatus` / `DeliveryStatus` | *Read a Message* response, `messages[]` | `id`, `status` ∈ {sent, delivered, read, failed}, `timestamp`, `recipient_id`, `errors[]` — the same field set the `statuses` webhook pushes as `Status`, read on demand instead. An unlisted status string is carried as `DeliveryStatus::Unknown`. The reference gives no format or length for a wamid, so `MAX_WAMID_LEN` (256 bytes) is this crate's own bound on what may enter the query string. |
 
 ## Deliberate divergences
 
@@ -62,6 +65,10 @@ Secondary sources — the developer reference pages the spec links to:
   `MessagingLimitTier::Unknown` and the string-typed `vertical`, `name_status`
   and `account_mode` keep whatever Meta sends, so a new value cannot break a
   deployment.
+* **A non-string `status` is carried too.** `MessageStatus` decodes any JSON
+  shape for `status`: a string is parsed, `null` becomes the default unknown,
+  anything else is kept as its raw JSON text. Failing the whole response on one
+  unexpected field value would hide the delivery state the caller asked for.
 * **No field-level webhook subscription.** The WABA node has no
   `subscribed_fields`; that parameter belongs to the app-level
   `/{app_id}/subscriptions` endpoint, which is out of scope (README).
