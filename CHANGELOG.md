@@ -10,6 +10,13 @@ of the README.
 ## [Unreleased]
 
 ### Changed
+- The query encoder is `percent-encoding` 2.3.2 (released 2025-08-21, 1.03 bn
+  downloads) instead of a hand-rolled byte loop. The escape set is
+  `NON_ALPHANUMERIC` minus `-`, `.`, `_` and `~` — RFC 3986's unreserved set —
+  so the wire output is unchanged: `%20` for a space, `%2C` for the field-list
+  separator, uppercase hex, and a literal `%` escaped to `%25`. A new property
+  test decodes every rendered query value back and compares it with the input.
+  Closes #6.
 - The retry module documents why its backoff curve stays local: `backoff` 0.4
   (the crate the audit named) has had no release since 2021-12 and needs
   `&mut self`; `backon` 1.6 computes in `f32` seconds (a 100 ms base yields

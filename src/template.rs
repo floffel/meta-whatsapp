@@ -22,6 +22,7 @@
 //! # Ok::<(), meta_whatsapp::Error>(())
 //! ```
 
+use percent_encoding::{utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
@@ -914,14 +915,17 @@ impl TemplateQuery {
             ("language", &self.language),
         ] {
             if let Some(value) = value {
-                parts.push(format!("{key}={}", percent_encode(value)));
+                parts.push(format!(
+                    "{key}={}",
+                    utf8_percent_encode(value, QUERY_VALUE_SET)
+                ));
             }
         }
         if !self.fields.is_empty() {
             let fields = self
                 .fields
                 .iter()
-                .map(|field| percent_encode(field))
+                .map(|field| utf8_percent_encode(field, QUERY_VALUE_SET).to_string())
                 .collect::<Vec<_>>()
                 .join("%2C");
             parts.push(format!("fields={fields}"));
@@ -1045,23 +1049,16 @@ pub struct TemplateSummary {
     pub components: Vec<Value>,
 }
 
-fn percent_encode(value: &str) -> String {
-    use std::fmt::Write as _;
-
-    let mut out = String::with_capacity(value.len());
-    for byte in value.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(char::from(byte));
-            }
-            _ => {
-                // Writing into a String cannot fail.
-                let _ = write!(out, "%{byte:02X}");
-            }
-        }
-    }
-    out
-}
+/// Characters escaped in a query value.
+///
+/// Everything outside RFC 3986's unreserved set is escaped, which keeps `-`,
+/// `.`, `_` and `~` literal and turns a space into `%20` (never `+`, which the
+/// Graph API would read as a literal plus).
+const QUERY_VALUE_SET: &AsciiSet = &NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'.')
+    .remove(b'_')
+    .remove(b'~');
 
 fn require_max_bytes(field: &'static str, value: &str, max: usize) -> Result<()> {
     if value.len() > max {
@@ -1077,11 +1074,28 @@ fn require_max_bytes(field: &'static str, value: &str, max: usize) -> Result<()>
 mod tests {
     use super::*;
 
+    fn encoded(value: &str) -> String {
+        utf8_percent_encode(value, QUERY_VALUE_SET).to_string()
+    }
+
     #[test]
-    fn percent_encoding_escapes_cursor_characters() {
-        assert_eq!(percent_encode("a+b/c="), "a%2Bb%2Fc%3D");
-        assert_eq!(percent_encode("safe-_.~"), "safe-_.~");
-        assert_eq!(percent_encode("ä"), "%C3%A4");
+    fn query_values_escape_everything_outside_the_unreserved_set() {
+        assert_eq!(encoded("a+b/c="), "a%2Bb%2Fc%3D");
+        assert_eq!(encoded("safe-_.~"), "safe-_.~");
+        assert_eq!(encoded("ä"), "%C3%A4");
+        assert_eq!(encoded(""), "");
+        assert_eq!(encoded("%"), "%25", "an existing escape is escaped again");
+        assert_eq!(encoded(" "), "%20", "a space is never a plus");
+        assert_eq!(
+            encoded("a&b=c"),
+            "a%26b%3Dc",
+            "a delimiter cannot split a value"
+        );
+        assert_eq!(
+            encoded("a,b"),
+            "a%2Cb",
+            "the field-list separator stays unambiguous"
+        );
     }
 
     #[test]

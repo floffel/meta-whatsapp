@@ -16,6 +16,7 @@ use meta_whatsapp::usage::BusinessUseCaseUsage;
 use meta_whatsapp::{
     Error, MessageRequest, RetryPolicy, TemplateQuery, TextMessage, WebhookPayload, WebhookVerifier,
 };
+use percent_encoding::percent_decode_str;
 use proptest::prelude::*;
 use serde_json::{Map, Value};
 
@@ -281,6 +282,33 @@ proptest! {
                 || matches!(c, '%' | '&' | '=' | '-' | '_' | '.' | '~')));
         let limit_part = format!("limit={limit}");
         prop_assert!(rendered.contains(&limit_part));
+    }
+
+    /// Every query value survives the round trip through the wire form, so a
+    /// cursor the provider handed out comes back byte for byte.
+    #[test]
+    fn template_query_values_decode_back_to_the_input(
+        cursor in ".{0,64}",
+        name in ".{0,64}",
+        language in ".{0,16}",
+    ) {
+        let rendered = TemplateQuery::new("1")
+            .after(&cursor)
+            .name(&name)
+            .language(&language)
+            .query_string();
+        let value_of = |key: &str| {
+            rendered
+                .split('&')
+                .find_map(|part| part.strip_prefix(key))
+                .and_then(|rest| rest.strip_prefix('='))
+                .map(str::to_owned)
+        };
+        for (key, expected) in [("after", &cursor), ("name", &name), ("language", &language)] {
+            let raw = value_of(key).unwrap();
+            let decoded = percent_decode_str(&raw).decode_utf8().unwrap();
+            prop_assert_eq!(decoded.as_ref(), expected.as_str());
+        }
     }
 
     /// Rendering is stable: JSON in, same JSON out (no field loss).
