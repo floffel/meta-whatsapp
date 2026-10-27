@@ -9,6 +9,10 @@ of the README.
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.1.5] - 2026-10-27
+
 ### Changed
 - The query encoder is `percent-encoding` 2.3.2 (released 2025-08-21, 1.03 bn
   downloads) instead of a hand-rolled byte loop. The escape set is
