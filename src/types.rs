@@ -28,6 +28,10 @@
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
 
+pub use crate::commerce::{
+    AddressField, AddressFieldType, AddressReply, Order, OrderItem, SavedAddress,
+};
+
 /// Top level webhook envelope.
 ///
 /// ```
@@ -348,6 +352,12 @@ pub struct Message {
     /// Present when `type == "interactive"` (button/list/flow reply).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interactive: Option<InteractiveReply>,
+    /// Present when `type == "order"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order: Option<Order>,
+    /// Present when `type == "address"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub address: Option<AddressReply>,
     /// Present when `type == "button"` (template quick-reply tap).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub button: Option<ButtonReply>,
@@ -397,6 +407,43 @@ impl Message {
     #[must_use]
     pub fn text_body(&self) -> Option<&str> {
         self.text.as_ref().map(|text| text.body.as_str())
+    }
+
+    /// The order block, if this is an inbound order.
+    ///
+    /// ```
+    /// use meta_whatsapp::Message;
+    ///
+    /// let message: Message = serde_json::from_str(
+    ///     r#"{"id":"1","from":"2","type":"order","order":{"catalog_id":"c","product_items":[
+    ///         {"product_retailer_id":"p","quantity":1,"item_price":4.0,"currency":"EUR"}]}}"#,
+    /// )?;
+    /// assert_eq!(message.order().map(|order| order.product_items.len()), Some(1));
+    /// # Ok::<(), serde_json::Error>(())
+    /// ```
+    #[must_use]
+    pub fn order(&self) -> Option<&Order> {
+        self.order.as_ref()
+    }
+
+    /// The address block, from either an interactive reply or an `address`
+    /// message.
+    ///
+    /// ```
+    /// use meta_whatsapp::Message;
+    ///
+    /// let message: Message = serde_json::from_str(
+    ///     r#"{"id":"1","from":"2","type":"interactive","interactive":{"type":"address_message","address_message":{"country":"DE","values":[{"type":"address","name":"city","value":"Berlin"}]}}}"#,
+    /// )?;
+    /// assert_eq!(message.address().and_then(|address| address.field("city")), Some("Berlin"));
+    /// # Ok::<(), serde_json::Error>(())
+    /// ```
+    #[must_use]
+    pub fn address(&self) -> Option<&AddressReply> {
+        self.interactive
+            .as_ref()
+            .and_then(|interactive| interactive.address_message.as_ref())
+            .or(self.address.as_ref())
     }
 
     /// `timestamp` parsed as unix seconds.
@@ -556,7 +603,7 @@ pub struct Reaction {
     pub emoji: Option<String>,
 }
 
-/// Reply to an interactive message.
+/// Reply to an interactive message: button, list, flow or address.
 ///
 /// ```
 /// use meta_whatsapp::types::InteractiveReply;
@@ -569,7 +616,7 @@ pub struct Reaction {
 /// ```
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub struct InteractiveReply {
-    /// `button_reply`, `list_reply` or `nfm_reply`.
+    /// `button_reply`, `list_reply`, `nfm_reply` or `address_message`.
     #[serde(rename = "type", default)]
     pub reply_type: String,
     /// Quick-reply selection.
@@ -581,6 +628,9 @@ pub struct InteractiveReply {
     /// Flow response payload.
     #[serde(default)]
     pub nfm_reply: Option<Value>,
+    /// Address response (`type == "address_message"`).
+    #[serde(default)]
+    pub address_message: Option<AddressReply>,
 }
 
 /// The id/title pair echoed for a button or list selection.

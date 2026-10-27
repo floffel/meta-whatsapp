@@ -189,6 +189,10 @@ impl Attempt {
                     Self::Terminal
                 }
             }
+            // The response existed, but its body could not be consumed. That
+            // is safe to repeat for an idempotent request and ambiguous for a
+            // send, exactly like any other answer lost after the write.
+            Error::ResponseTooLarge { .. } => Self::NoAnswer,
             _ => Self::Terminal,
         }
     }

@@ -145,6 +145,33 @@ pub enum Error {
         phase: TransportPhase,
     },
 
+    /// A response body exceeded the transport's configured size cap.
+    ///
+    /// The cap is enforced before a chunk that would cross it is appended, so
+    /// the process never allocates the over-cap body. The message contains
+    /// sizes only, never response bytes.
+    ///
+    /// ```rust
+    /// use meta_whatsapp::Error;
+    ///
+    /// let error = Error::ResponseTooLarge {
+    ///     limit_bytes: 4,
+    ///     size_bytes: 5,
+    /// };
+    /// assert_eq!(error.to_string(), "response body exceeds the 4-byte limit (declared or received 5 bytes)");
+    /// assert!(!error.to_string().contains("secret body"));
+    /// ```
+    #[error(
+        "response body exceeds the {limit_bytes}-byte limit (declared or received {size_bytes} bytes)"
+    )]
+    ResponseTooLarge {
+        /// Maximum number of response-body bytes the transport accepts.
+        limit_bytes: usize,
+        /// `Content-Length` when it exceeded the cap, otherwise the number of
+        /// bytes read before the running total crossed it.
+        size_bytes: u64,
+    },
+
     /// The Graph API answered with an error envelope, or with a non-2xx body
     /// that is not JSON.
     #[error("graph api error {code} (http {status}): {message}")]
@@ -335,8 +362,8 @@ impl Error {
     #[must_use]
     pub fn is_ambiguous(&self) -> bool {
         match self {
-            Self::Ambiguous { .. } => true,
             Self::Transport { phase, .. } => phase.is_after_write(),
+            Self::Ambiguous { .. } | Self::ResponseTooLarge { .. } => true,
             _ => false,
         }
     }
@@ -456,6 +483,10 @@ mod tests {
             Error::transport("x"),
             Error::transport_after_write("x"),
             Error::transport_terminal("x"),
+            Error::ResponseTooLarge {
+                limit_bytes: 1,
+                size_bytes: 2,
+            },
             Error::ambiguous("op", None, Error::transport("x")),
         ];
         for error in errors {

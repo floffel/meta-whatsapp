@@ -106,11 +106,19 @@ validates before rendering, so an invalid message never reaches the network.
 | location | `LocationMessage` | range- and `NaN`-checked |
 | contacts | `ContactsMessage` + `ContactCard` | name, phones, e-mails, org, URLs, birthday |
 | reaction | `ReactionMessage` | empty emoji removes a reaction |
-| interactive | `ButtonMessage`, `ListMessage`, `FlowMessage` | 1–3 buttons, 1–10 list rows, flows |
+| interactive | `ButtonMessage`, `ListMessage`, `FlowMessage`, `ProductMessage`, `ProductListMessage`, `OrderDetailsMessage`, `OrderStatusMessage`, `AddressMessage` | buttons, lists, flows, single/multi-product, order details/status, address forms |
+| catalog | `CatalogMessage` | catalog thumbnail product |
 | template | `TemplateMessage` | text/currency/date-time/media parameters, header/body/button merges |
 
 Envelope-level features: reply context (`context.message_id`),
 `biz_opaque_callback_data`, and `recipient_type`.
+
+Inbound commerce payloads are typed too: `Message::order()` returns the
+`Order` with its line items, and `Message::address()` returns the
+`AddressReply` from either an interactive or a top-level `address` block.
+Commerce limits are validated before rendering: at most 30 products across 10
+product sections, 30 order line items, 35-character order reference ids, and
+20 pre-filled/10 saved addresses.
 
 ## Media
 
@@ -236,6 +244,10 @@ to need a patch release — `docs/contracts.md` records the sources:
   counters are ignored, not typed.
 * **Blocklist batch size.** No documented maximum, so none is enforced beyond the
   per-number validation.
+* **Commerce limit provenance.** The product/order/address ceilings are taken
+  from the developer-reference limits, not from the OpenAPI schema. The parser
+  also accepts order quantities and prices as strings and preserves unknown
+  address fields, so a representation change is not a parse failure.
 
 ## Tracked gaps
 
@@ -243,9 +255,6 @@ A Cloud API surface this crate does not implement is an issue, not an exclusion.
 The list below is the shortcut; the issue is the contract, and an entry leaves
 this section when its issue closes.
 
-* **Catalog / product / order / address messages** — issue #7. Commerce
-  payloads with their own schema churn; `MessageBody` stays `#[non_exhaustive]`
-  so they can land without a breaking release.
 * **Flow data-exchange endpoints** — issue #8. Until then the inbound
   `nfm_reply` payload is passed through raw (`InteractiveReply::nfm_reply`);
   decrypting and serving flows is a server concern, not a client one.
@@ -280,14 +289,17 @@ The suite has five layers:
   truncated JSON, duplicate keys, unknown event types and 32-task concurrency
   tests. `tests/delivery.rs` pins the retry contract call-by-call;
   `tests/account.rs` covers profile/quality/limits/blocklist/subscriptions/usage;
+  `tests/commerce.rs` covers catalog/product/order/address wire shapes and every
+  commerce boundary;
   `tests/reqwest_transport.rs` drives the bundled transport against a local
   socket and a refused connection.
 * **Property** (`proptest`) — webhook parsing never panics over arbitrary JSON,
   sign/verify round-trips for arbitrary secrets and bodies, text acceptance
-  matches the documented boundary, backoff stays bounded, queries stay
-  percent-encoded, and "no non-idempotent request is retried after a 5xx" holds
-  for every status, budget and attempt count.
-* **Doctest** — every public item has a runnable example (403 doctests).
+  matches the documented boundary, commerce enums preserve unknown spellings,
+  backoff stays bounded, queries stay percent-encoded, and "no non-idempotent
+  request is retried after a 5xx" holds for every status, budget and attempt
+  count.
+* **Doctest** — every public item has a runnable example (478 doctests).
 * **Fuzz** (`fuzz/`, nightly) — one libFuzzer target per parser, each pinning the
   invariant it protects instead of only "does not panic":
   * `webhook_payload` — arbitrary JSON through the permissive parser; a key the

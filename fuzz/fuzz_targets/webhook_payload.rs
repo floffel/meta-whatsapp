@@ -43,6 +43,8 @@ fuzz_target!(|data: &[u8]| {
         let _ = phone_number_id.len();
         let _ = message.media();
         let _ = message.text_body();
+        let _ = message.order();
+        let _ = message.address();
         let _ = message.timestamp_secs();
     }
     for status in payload.statuses() {
