@@ -28,6 +28,8 @@
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
 
+use crate::commerce::{AddressReply, Order};
+
 /// Top level webhook envelope.
 ///
 /// ```
@@ -348,6 +350,12 @@ pub struct Message {
     /// Present when `type == "interactive"` (button/list/flow reply).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interactive: Option<InteractiveReply>,
+    /// Present when `type == "order"` (customer submitted an order).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order: Option<Order>,
+    /// Address response carried at the top level by some webhook versions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub address: Option<AddressReply>,
     /// Present when `type == "button"` (template quick-reply tap).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub button: Option<ButtonReply>,
@@ -412,6 +420,49 @@ impl Message {
     #[must_use]
     pub fn timestamp_secs(&self) -> Option<u64> {
         self.timestamp.trim().parse().ok()
+    }
+
+    /// The inbound order, if this message is an order.
+    ///
+    /// ```
+    /// use meta_whatsapp::Message;
+    ///
+    /// let message: Message = serde_json::from_str(
+    ///     r#"{"id":"1","from":"2","type":"order","order":{
+    ///         "catalog_id":"c","text":"","product_items":[
+    ///             {"product_retailer_id":"sku-1","quantity":"2","item_price":"4.5","currency":"EUR"}
+    ///         ]}}"#,
+    /// ).unwrap();
+    /// let order = message.order().unwrap();
+    /// assert_eq!(order.product_items[0].quantity, 2);
+    /// assert_eq!(order.product_items[0].item_price, 4.5);
+    /// ```
+    #[must_use]
+    pub fn order(&self) -> Option<&Order> {
+        self.order.as_ref()
+    }
+
+    /// The address reply, whether Meta placed it under
+    /// `interactive.address_message` or at the top level.
+    ///
+    /// ```
+    /// use meta_whatsapp::Message;
+    ///
+    /// let message: Message = serde_json::from_str(
+    ///     r#"{"id":"1","from":"2","type":"interactive","interactive":{
+    ///         "type":"address_message",
+    ///         "address_message":{"country":"DE","values":[
+    ///             {"name":"city","value":"Berlin"}
+    ///         ]}}}"#,
+    /// ).unwrap();
+    /// assert_eq!(message.address().unwrap().field("city"), Some("Berlin"));
+    /// ```
+    #[must_use]
+    pub fn address(&self) -> Option<&AddressReply> {
+        self.interactive
+            .as_ref()
+            .and_then(|interactive| interactive.address_message.as_ref())
+            .or(self.address.as_ref())
     }
 }
 
@@ -581,6 +632,9 @@ pub struct InteractiveReply {
     /// Flow response payload.
     #[serde(default)]
     pub nfm_reply: Option<Value>,
+    /// Address form response (`type == "address_message"`).
+    #[serde(default)]
+    pub address_message: Option<AddressReply>,
 }
 
 /// The id/title pair echoed for a button or list selection.

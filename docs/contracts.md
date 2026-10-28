@@ -52,6 +52,10 @@ Secondary sources — the developer reference pages the spec links to:
 | `WebhookSubscriptions` / `SubscribedApp` | `SubscribedAppsResponse`, `SubscribedApp` | Each entry may wrap the app in `whatsapp_business_api_data` (spec example) — both parse. |
 | `SubscriptionConfig` | `SubscriptionRequest` | `override_callback_uri`, `verify_token`. |
 | `BusinessUseCaseUsage` / `UseCaseUsage` | header `x-business-use-case-usage` | Header value is a JSON object keyed by business id, each value an array of `{type, call_count, total_cputime, total_time, estimated_time_to_regain_access}`. |
+| `CatalogMessage` / `ProductMessage` / `ProductListMessage` | `InteractiveObject`, `ActionObject` | `catalog_message` uses `action.name = catalog_message` and `thumbnail_product_retailer_id`; `product` and `product_list` use `catalog_id` plus `product_retailer_id` or `sections`. Product lists require a text header. Limits: 10 sections, 30 products total, 24-character section titles, 60-character header/footer, 1024-byte body. |
+| `OrderDetailsMessage` / `OrderStatusMessage` | `InteractiveObject`, `ActionObject` examples | The existing order-details contract uses `order_details` with `action.name = review_order`, `reference_id`, and an order of `catalog_id` plus `product_items`. Status updates use `order_status` with the same action name and `order.status`. Limits: 30 items, 35-character reference id, quantity >= 1, finite non-negative prices, three-letter uppercase currency. |
+| `Order` / `OrderItem` | `OrderMessage.order` | Inbound `type: "order"` items; snake_case and camelCase aliases both parse, as do numeric strings for `quantity` and `item_price`. Unknown members stay in `extra`. |
+| `AddressMessage` / `AddressReply` | not present in the v23 OpenAPI file | Shape comes from the Cloud API address-message guide: `interactive.type = address_message`, `action.name = address_message`, parameters `country`, `values[]` and `saved_addresses[]`. Unknown field types and members are carried. |
 
 ## Deliberate divergences
 
@@ -65,3 +69,7 @@ Secondary sources — the developer reference pages the spec links to:
 * **No field-level webhook subscription.** The WABA node has no
   `subscribed_fields`; that parameter belongs to the app-level
   `/{app_id}/subscriptions` endpoint, which is out of scope (README).
+* **Commerce order variants.** The v23 OpenAPI example also contains a newer
+  `review_and_pay` payment flow. This crate implements the established
+  `review_order` order-details/status contract; the payment-specific shape is
+  not represented by `OrderDetailsMessage`.

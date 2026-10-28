@@ -9,7 +9,26 @@ of the README.
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+- Catalog, single-product, multi-product, order-details, order-status and
+  address messages, with typed validation and named limit constants in
+  `meta_whatsapp::commerce`.
+- Permissive inbound order parsing on `Message::order()`, including camelCase
+  aliases and numeric strings, and address replies on `Message::address()` for
+  both `interactive.address_message` and top-level `address` payloads.
+- `tests/commerce.rs` covers every wire shape and both sides of every limit;
+  the existing `webhook_payload` fuzz target exercises the inbound parsers.
+  Closes #7.
+
+### Fixed
+- `ReqwestTransport` no longer buffers an unbounded response body. It reads
+  chunk by chunk and stops as soon as the configured
+  `max_response_bytes` would be exceeded; the default,
+  `DEFAULT_MAX_RESPONSE_BYTES`, is 100 MiB so the largest supported media
+  download still fits. A missing or misleading `Content-Length` cannot bypass
+  the cap, and an oversized body is an after-write transport error. Tests cover
+  both sides of the limit for declared-length and chunked responses. Closes
+  #11.
 
 ## [0.1.5] - 2026-10-27
 

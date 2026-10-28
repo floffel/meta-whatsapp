@@ -115,6 +115,13 @@ pub enum Error {
     #[error("invalid payload: {0}")]
     Payload(String),
 
+    /// A Flow data-exchange key, ciphertext or payload was invalid.
+    ///
+    /// The message never includes private-key material or plaintext. Treat it
+    /// as terminal: a failed authentication cannot become valid on retry.
+    #[error("flow data exchange error: {0}")]
+    Flow(String),
+
     /// An argument would be rejected by the API, or is unsafe to interpolate
     /// into a URL. The request is never sent.
     ///
@@ -453,6 +460,7 @@ mod tests {
                 tolerance_secs: 2,
             },
             Error::Payload(String::new()),
+            Error::Flow(String::new()),
             Error::transport("x"),
             Error::transport_after_write("x"),
             Error::transport_terminal("x"),

@@ -7,9 +7,10 @@
 //!   replay window, and parse the payload into types (message events, status
 //!   events, and unknown future events).
 //! * [`client`] — send every message family (text, media, location, contacts,
-//!   reaction, interactive buttons/list/flow, templates), upload/download/delete
-//!   media, list templates, and administer the account (business profile,
-//!   phone-number quality and limits, blocklist, webhook subscriptions).
+//!   reaction, interactive buttons/list/flow, catalog/product/order/address
+//!   commerce payloads, templates), upload/download/delete media, list
+//!   templates, and administer the account (business profile, phone-number
+//!   quality and limits, blocklist, webhook subscriptions).
 //! * [`business`], [`subscription`], [`usage`] — the typed shapes behind that
 //!   administration surface, including Meta's `X-Business-Use-Case-Usage`
 //!   budget header.
@@ -85,7 +86,9 @@
 
 pub mod business;
 pub mod client;
+pub mod commerce;
 pub mod error;
+pub mod flow;
 pub mod media;
 pub mod message;
 pub mod retry;
@@ -101,7 +104,21 @@ pub use business::{
     BusinessProfileUpdate, MessagingLimitTier, PhoneNumberInfo, QualityRating,
 };
 pub use client::{SendOutcome, WhatsAppClient, DEFAULT_API_VERSION};
+pub use commerce::{
+    AddressField, AddressFieldType, AddressMessage, AddressReply, AddressType, AddressValue,
+    CatalogMessage, Order, OrderDetailsMessage, OrderItem, OrderMessage, OrderStatus,
+    OrderStatusMessage, ProductItem, ProductListMessage, ProductMessage, ProductSection,
+    SavedAddress,
+};
 pub use error::{Error, Result, TransportPhase};
+pub use flow::{
+    FlowDecryptedRequest, FlowEncryptedRequest, FlowEncryptedResponse, FlowEndpoint,
+    FlowExchangeAction, FlowReply, FlowRequest, FlowResponse, NfmReply, AES_KEY_BYTES,
+    FLOW_DATA_EXCHANGE_VERSION, FLOW_DATA_MAX_BYTES, FLOW_ERROR_MESSAGE_MAX_BYTES,
+    FLOW_PRIVATE_KEY_MAX_BYTES, FLOW_RESPONSE_JSON_MAX_BYTES, FLOW_RSA_MIN_BITS,
+    FLOW_SCREEN_MAX_CHARS, FLOW_TOKEN_MAX_BYTES, FLOW_VERSION_MAX_CHARS, GCM_TAG_BYTES,
+    INITIAL_VECTOR_BYTES,
+};
 pub use media::{MediaBytes, MediaInfo, MediaRef, MediaUpload};
 pub use message::{
     AudioMessage, ButtonMessage, ContactCard, ContactEmail, ContactName, ContactOrg, ContactPhone,
@@ -119,7 +136,7 @@ pub use template::{
     TemplateMediaKind, TemplateMessage, TemplateParameter, TemplateQuery, TemplateSummary,
 };
 #[cfg(feature = "http")]
-pub use transport::ReqwestTransport;
+pub use transport::{ReqwestTransport, DEFAULT_MAX_RESPONSE_BYTES};
 pub use transport::Transport;
 pub use types::{Change, ChangeValue, Entry, Message, Status, WebhookPayload};
 pub use usage::{BusinessUseCaseUsage, UseCaseUsage};

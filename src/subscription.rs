@@ -1,12 +1,23 @@
-//! Webhook subscription management for a WhatsApp Business Account.
+//! Webhook subscription management at the app and WhatsApp Business Account
+//! levels.
 //!
-//! Three Graph API calls sit behind this module:
+//! The WABA-level three Graph API calls sit behind this module:
 //!
 //! | Call | Endpoint |
 //! | --- | --- |
 //! | list | `GET /{waba-id}/subscribed_apps` |
 //! | subscribe | `POST /{waba-id}/subscribed_apps` |
 //! | unsubscribe | `DELETE /{waba-id}/subscribed_apps` |
+//!
+//! The app-level endpoint is a separate subscription. It is the one that picks
+//! the webhook fields (`messages`, `message_template_status_update`, …) and
+//! carries the callback URL and verification token:
+//!
+//! | Call | Endpoint |
+//! | --- | --- |
+//! | list | `GET /{app-id}/subscriptions` |
+//! | subscribe | `POST /{app-id}/subscriptions` |
+//! | unsubscribe | `DELETE /{app-id}/subscriptions?object=whatsapp_business_account` |
 //!
 //! A subscription can silently disappear — the app was re-deployed with a new
 //! callback URL, an app secret changed, or an admin removed it in WhatsApp
@@ -25,10 +36,58 @@
 //! # Ok::<(), meta_whatsapp::Error>(())
 //! ```
 
-use serde::{Deserialize, Serialize};
+use serde::de::Error as _;
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
 
 use crate::error::{Error, Result};
+
+/// Graph object subscribed to WhatsApp Business Account webhooks.
+///
+/// ```
+/// assert_eq!(
+///     meta_whatsapp::subscription::WHATSAPP_WEBHOOK_OBJECT,
+///     "whatsapp_business_account"
+/// );
+/// ```
+pub const WHATSAPP_WEBHOOK_OBJECT: &str = "whatsapp_business_account";
+
+/// Maximum number of digits in an app id used as a URL segment.
+///
+/// ```
+/// assert_eq!(meta_whatsapp::subscription::APP_ID_MAX_DIGITS, 32);
+/// ```
+pub const APP_ID_MAX_DIGITS: usize = 32;
+
+/// Maximum characters in a webhook callback URL.
+///
+/// ```
+/// assert_eq!(
+///     meta_whatsapp::subscription::WEBHOOK_CALLBACK_URL_MAX_CHARS,
+///     1024
+/// );
+/// ```
+pub const WEBHOOK_CALLBACK_URL_MAX_CHARS: usize = 1024;
+
+/// Maximum characters in a webhook verification token.
+///
+/// ```
+/// assert_eq!(
+///     meta_whatsapp::subscription::WEBHOOK_VERIFY_TOKEN_MAX_CHARS,
+///     256
+/// );
+/// ```
+pub const WEBHOOK_VERIFY_TOKEN_MAX_CHARS: usize = 256;
+
+/// Minimum number of fields an app-level subscription must request.
+///
+/// A subscription with no fields receives nothing, so an empty list is
+/// rejected before the request.
+///
+/// ```
+/// assert_eq!(meta_whatsapp::subscription::WEBHOOK_FIELDS_MIN, 1);
+/// ```
+pub const WEBHOOK_FIELDS_MIN: usize = 1;
 
 /// One application subscribed to a WABA's webhooks.
 ///

@@ -40,13 +40,15 @@ use crate::transport::Method;
 ///
 /// assert_eq!(Repeatability::of_method(Method::Get), Repeatability::Idempotent);
 /// assert_eq!(Repeatability::of_method(Method::Delete), Repeatability::Idempotent);
+/// assert_eq!(Repeatability::of_method(Method::Put), Repeatability::Idempotent);
 /// assert_eq!(Repeatability::of_method(Method::Post), Repeatability::NotIdempotent);
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Repeatability {
-    /// Repeating is harmless: `GET` and `DELETE` are idempotent by definition
-    /// (deleting twice leaves the same state as deleting once).
+    /// Repeating is harmless: `GET`, `PUT` and `DELETE` are idempotent by
+    /// definition (replacing or deleting twice leaves the same state as doing
+    /// it once).
     Idempotent,
     /// Repeating may duplicate an effect: sending a message, uploading media.
     /// WhatsApp has no idempotency key, so a repeat is visible to the
@@ -67,7 +69,7 @@ impl Repeatability {
     #[must_use]
     pub fn of_method(method: Method) -> Self {
         match method {
-            Method::Get | Method::Delete => Self::Idempotent,
+            Method::Get | Method::Put | Method::Delete => Self::Idempotent,
             Method::Post => Self::NotIdempotent,
         }
     }

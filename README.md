@@ -107,10 +107,28 @@ validates before rendering, so an invalid message never reaches the network.
 | contacts | `ContactsMessage` + `ContactCard` | name, phones, e-mails, org, URLs, birthday |
 | reaction | `ReactionMessage` | empty emoji removes a reaction |
 | interactive | `ButtonMessage`, `ListMessage`, `FlowMessage` | 1–3 buttons, 1–10 list rows, flows |
+| commerce | `CatalogMessage`, `ProductMessage`, `ProductListMessage`, `OrderDetailsMessage`, `OrderStatusMessage`, `AddressMessage` | catalog/product/order/address interactive payloads |
 | template | `TemplateMessage` | text/currency/date-time/media parameters, header/body/button merges |
 
 Envelope-level features: reply context (`context.message_id`),
 `biz_opaque_callback_data`, and `recipient_type`.
+
+### Commerce
+
+Catalog and product messages are interactive on the wire: `CatalogMessage`
+renders `catalog_message`, `ProductMessage` renders `product`, and
+`ProductListMessage` renders `product_list` with up to ten sections and thirty
+products in total. Order details and status updates use `order_details` and
+`order_status`, with the `review_order` action. `AddressMessage` requests a
+delivery address with up to twenty pre-filled values and ten saved addresses.
+
+Inbound `type: "order"` payloads are available as `Message::order()`. Address
+replies are available as `Message::address()`, whether Meta wraps them in
+`interactive.address_message` or places an `address` block at the top level.
+Numeric strings, camelCase aliases and unknown fields are accepted; unknown
+order-status and address-field values are carried through instead of rejected.
+The commerce length and count limits all have named constants in
+`meta_whatsapp::commerce`.
 
 ## Media
 
@@ -204,6 +222,10 @@ with a token the API just rejected.
 * `ReqwestTransport` classifies `reqwest` failures by phase: `is_connect()` is
   "before the write" (retryable), a timeout or body/decode error is "after the
   write" (ambiguous for a send), and anything else is terminal.
+* `ReqwestTransport` streams response bodies and rejects anything over
+  `max_response_bytes` (100 MiB by default, the largest supported document)
+  while reading. `with_max_response_bytes` raises or lowers the cap; a
+  `Content-Length` above it is rejected before the body is allocated.
 * TLS trust store: the `http` feature builds `reqwest` with
   `default-features = false, features = ["json", "rustls"]`. `reqwest` 0.13
   validates against the platform trust store (`rustls-platform-verifier`) and
@@ -243,9 +265,6 @@ A Cloud API surface this crate does not implement is an issue, not an exclusion.
 The list below is the shortcut; the issue is the contract, and an entry leaves
 this section when its issue closes.
 
-* **Catalog / product / order / address messages** — issue #7. Commerce
-  payloads with their own schema churn; `MessageBody` stays `#[non_exhaustive]`
-  so they can land without a breaking release.
 * **Flow data-exchange endpoints** — issue #8. Until then the inbound
   `nfm_reply` payload is passed through raw (`InteractiveReply::nfm_reply`);
   decrypting and serving flows is a server concern, not a client one.
@@ -280,6 +299,8 @@ The suite has five layers:
   truncated JSON, duplicate keys, unknown event types and 32-task concurrency
   tests. `tests/delivery.rs` pins the retry contract call-by-call;
   `tests/account.rs` covers profile/quality/limits/blocklist/subscriptions/usage;
+  `tests/commerce.rs` covers catalog/product/order/address wire shapes and every
+  commerce boundary;
   `tests/reqwest_transport.rs` drives the bundled transport against a local
   socket and a refused connection.
 * **Property** (`proptest`) — webhook parsing never panics over arbitrary JSON,
@@ -287,7 +308,7 @@ The suite has five layers:
   matches the documented boundary, backoff stays bounded, queries stay
   percent-encoded, and "no non-idempotent request is retried after a 5xx" holds
   for every status, budget and attempt count.
-* **Doctest** — every public item has a runnable example (403 doctests).
+* **Doctest** — every public item has a runnable example (487 doctests).
 * **Fuzz** (`fuzz/`, nightly) — one libFuzzer target per parser, each pinning the
   invariant it protects instead of only "does not panic":
   * `webhook_payload` — arbitrary JSON through the permissive parser; a key the
@@ -300,6 +321,9 @@ The suite has five layers:
     subscription parsers, including the `Display` of every typed error.
   * `header_values` — `Retry-After`, the usage-budget header, and the round trip
     of the two permissive string enums through their wire spelling.
+  * Commerce parsing rides in `webhook_payload`: inbound orders and address
+    replies, standalone and inside the envelope, with numeric strings, unknown
+    members and re-serialisation of accepted payloads.
 
   The seeds in `fuzz/corpus/` are real payloads; the signature seed carries a
   genuine HMAC for the fuzz secret, so the parser is reached on the first

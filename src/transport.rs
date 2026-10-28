@@ -428,9 +428,37 @@ pub trait Transport {
 /// # }
 /// ```
 #[cfg(feature = "http")]
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct ReqwestTransport {
     client: reqwest::Client,
+    max_response_bytes: usize,
+}
+
+/// Default response-body ceiling for [`ReqwestTransport`]: 100 MiB.
+///
+/// That is the largest document the Cloud API accepts, so the bundled
+/// transport can still download any media it could have uploaded. Responses are
+/// read incrementally; the cap applies whether or not the server sent a
+/// `Content-Length`.
+///
+/// ```
+/// # #[cfg(feature = "http")]
+/// # {
+/// use meta_whatsapp::transport::DEFAULT_MAX_RESPONSE_BYTES;
+/// assert_eq!(DEFAULT_MAX_RESPONSE_BYTES, 100 * 1024 * 1024);
+/// # }
+/// ```
+#[cfg(feature = "http")]
+pub const DEFAULT_MAX_RESPONSE_BYTES: usize = 100 * 1024 * 1024;
+
+#[cfg(feature = "http")]
+impl Default for ReqwestTransport {
+    fn default() -> Self {
+        Self {
+            client: reqwest::Client::default(),
+            max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES,
+        }
+    }
 }
 
 #[cfg(feature = "http")]
@@ -439,11 +467,58 @@ impl ReqwestTransport {
     ///
     /// ```
     /// # #[cfg(feature = "http")]
+    /// # {
     /// let transport = meta_whatsapp::ReqwestTransport::new();
+    /// assert_eq!(
+    ///     transport.max_response_bytes(),
+    ///     meta_whatsapp::transport::DEFAULT_MAX_RESPONSE_BYTES
+    /// );
+    /// # }
     /// ```
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Sets the largest response body the transport will buffer.
+    ///
+    /// The body is read in chunks and the request fails as soon as adding the
+    /// next chunk would exceed this many bytes. A `Content-Length` above the
+    /// cap is rejected before the body is allocated. The default already fits
+    /// the largest supported document; lower it when the response is known to
+    /// be small.
+    ///
+    /// ```
+    /// # #[cfg(feature = "http")]
+    /// # {
+    /// use meta_whatsapp::ReqwestTransport;
+    ///
+    /// let transport = ReqwestTransport::new().with_max_response_bytes(4096);
+    /// assert_eq!(transport.max_response_bytes(), 4096);
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn with_max_response_bytes(mut self, limit: usize) -> Self {
+        self.max_response_bytes = limit;
+        self
+    }
+
+    /// The configured response-body ceiling, in bytes.
+    ///
+    /// ```
+    /// # #[cfg(feature = "http")]
+    /// # {
+    /// use meta_whatsapp::ReqwestTransport;
+    ///
+    /// assert_eq!(
+    ///     ReqwestTransport::new().max_response_bytes(),
+    ///     meta_whatsapp::transport::DEFAULT_MAX_RESPONSE_BYTES
+    /// );
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn max_response_bytes(&self) -> usize {
+        self.max_response_bytes
     }
 }
 
@@ -470,7 +545,7 @@ impl Transport for ReqwestTransport {
             }
         };
 
-        let response = builder
+        let mut response = builder
             .send()
             .await
             .map_err(|error| describe_reqwest_error(&error))?;
@@ -485,14 +560,59 @@ impl Transport for ReqwestTransport {
                 )
             })
             .collect::<Vec<_>>();
-        let body = response
-            .bytes()
-            .await
-            .map_err(|error| describe_reqwest_error(&error))?
-            .to_vec();
+        let body = read_body(&mut response, self.max_response_bytes).await?;
 
         Ok(Response::new(status, headers, body))
     }
+}
+
+/// Reads a response body without ever buffering more than `limit` bytes.
+///
+/// `Content-Length` is only a hint: a response may be chunked or lie about its
+/// length, so every chunk is checked as it arrives. Exceeding the cap is a
+/// post-write failure — the request reached the server, but the response cannot
+/// be handed to the caller.
+#[cfg(feature = "http")]
+async fn read_body(response: &mut reqwest::Response, limit: usize) -> Result<Vec<u8>> {
+    const MAX_PREALLOC_BYTES: usize = 64 * 1024;
+
+    let content_length = response.content_length();
+    if content_length.is_some_and(|length| length_exceeds(length, limit)) {
+        return Err(response_too_large(limit));
+    }
+    let capacity = content_length
+        .and_then(|length| usize::try_from(length).ok())
+        .map_or(0, |length| length.min(limit).min(MAX_PREALLOC_BYTES));
+    let mut body = Vec::with_capacity(capacity);
+
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|error| describe_reqwest_error(&error))?
+    {
+        let total = body
+            .len()
+            .checked_add(chunk.len())
+            .ok_or_else(|| response_too_large(limit))?;
+        if total > limit {
+            return Err(response_too_large(limit));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
+/// Whether a wire length cannot fit in `limit` bytes on this target.
+#[cfg(feature = "http")]
+fn length_exceeds(length: u64, limit: usize) -> bool {
+    usize::try_from(length).map_or(true, |length| length > limit)
+}
+
+#[cfg(feature = "http")]
+fn response_too_large(limit: usize) -> Error {
+    Error::transport_after_write(format!(
+        "response body exceeds the configured {limit}-byte limit"
+    ))
 }
 
 /// What kind of connection failure a `reqwest` error reports, independent of
@@ -546,6 +666,20 @@ fn describe_reqwest_error(error: &reqwest::Error) -> Error {
 #[cfg(all(test, feature = "http"))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn response_lengths_stop_at_the_boundary() {
+        assert!(!length_exceeds(4, 4));
+        assert!(length_exceeds(5, 4));
+    }
+
+    #[test]
+    fn the_default_transport_uses_the_documented_response_cap() {
+        assert_eq!(
+            ReqwestTransport::default().max_response_bytes(),
+            DEFAULT_MAX_RESPONSE_BYTES
+        );
+    }
 
     #[test]
     fn only_connect_failures_count_as_before_the_write() {

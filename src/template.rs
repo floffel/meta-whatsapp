@@ -1,8 +1,11 @@
-//! Template messages (send) and template listing (read).
+//! Template messages, listing and management.
 //!
 //! Templates are pre-approved by Meta. Sending one references its name and
 //! language plus the positional parameters for the header, body and buttons;
-//! listing them reads `/{waba_id}/message_templates` with cursor paging.
+//! listing them reads `/{waba_id}/message_templates` with cursor paging, and
+//! [`crate::WhatsAppClient::create_template`],
+//! [`crate::WhatsAppClient::update_template`] and
+//! [`crate::WhatsAppClient::delete_template`] manage the definitions.
 //!
 //! ```
 //! use meta_whatsapp::{MessageRequest, TemplateMessage};
@@ -28,6 +31,118 @@ use serde_json::{json, Map, Value};
 
 use crate::error::{Error, Result};
 use crate::media::MediaRef;
+
+/// Maximum UTF-8 byte length of a template name.
+///
+/// ```
+/// use meta_whatsapp::template::TEMPLATE_NAME_MAX_BYTES;
+/// assert_eq!(TEMPLATE_NAME_MAX_BYTES, 512);
+/// ```
+pub const TEMPLATE_NAME_MAX_BYTES: usize = 512;
+
+/// Maximum character length of a template language code.
+///
+/// ```
+/// use meta_whatsapp::template::TEMPLATE_LANGUAGE_MAX_CHARS;
+/// assert_eq!(TEMPLATE_LANGUAGE_MAX_CHARS, 32);
+/// ```
+pub const TEMPLATE_LANGUAGE_MAX_CHARS: usize = 32;
+
+/// Maximum UTF-8 byte length of a template parameter example.
+///
+/// ```
+/// use meta_whatsapp::template::TEMPLATE_PARAMETER_MAX_BYTES;
+/// assert_eq!(TEMPLATE_PARAMETER_MAX_BYTES, 1024);
+/// ```
+pub const TEMPLATE_PARAMETER_MAX_BYTES: usize = 1024;
+
+/// Maximum character length of a text header definition.
+///
+/// ```
+/// use meta_whatsapp::template::TEMPLATE_HEADER_MAX_CHARS;
+/// assert_eq!(TEMPLATE_HEADER_MAX_CHARS, 60);
+/// ```
+pub const TEMPLATE_HEADER_MAX_CHARS: usize = 60;
+
+/// Maximum UTF-8 byte length of a body definition.
+///
+/// ```
+/// use meta_whatsapp::template::TEMPLATE_BODY_MAX_BYTES;
+/// assert_eq!(TEMPLATE_BODY_MAX_BYTES, 1024);
+/// ```
+pub const TEMPLATE_BODY_MAX_BYTES: usize = 1024;
+
+/// Maximum character length of a footer definition.
+///
+/// ```
+/// use meta_whatsapp::template::TEMPLATE_FOOTER_MAX_CHARS;
+/// assert_eq!(TEMPLATE_FOOTER_MAX_CHARS, 60);
+/// ```
+pub const TEMPLATE_FOOTER_MAX_CHARS: usize = 60;
+
+/// Maximum character length of a template button label.
+///
+/// ```
+/// use meta_whatsapp::template::TEMPLATE_BUTTON_TEXT_MAX_CHARS;
+/// assert_eq!(TEMPLATE_BUTTON_TEXT_MAX_CHARS, 25);
+/// ```
+pub const TEMPLATE_BUTTON_TEXT_MAX_CHARS: usize = 25;
+
+/// Maximum character length of a URL button's destination.
+///
+/// ```
+/// use meta_whatsapp::template::TEMPLATE_BUTTON_URL_MAX_CHARS;
+/// assert_eq!(TEMPLATE_BUTTON_URL_MAX_CHARS, 2000);
+/// ```
+pub const TEMPLATE_BUTTON_URL_MAX_CHARS: usize = 2000;
+
+/// Maximum character length of a copy-code button example.
+///
+/// ```
+/// use meta_whatsapp::template::TEMPLATE_BUTTON_EXAMPLE_MAX_CHARS;
+/// assert_eq!(TEMPLATE_BUTTON_EXAMPLE_MAX_CHARS, 15);
+/// ```
+pub const TEMPLATE_BUTTON_EXAMPLE_MAX_CHARS: usize = 15;
+
+/// Maximum number of buttons in a template.
+///
+/// ```
+/// use meta_whatsapp::template::TEMPLATE_BUTTONS_MAX;
+/// assert_eq!(TEMPLATE_BUTTONS_MAX, 10);
+/// ```
+pub const TEMPLATE_BUTTONS_MAX: usize = 10;
+
+/// Maximum number of URL buttons in a template.
+///
+/// ```
+/// use meta_whatsapp::template::TEMPLATE_URL_BUTTONS_MAX;
+/// assert_eq!(TEMPLATE_URL_BUTTONS_MAX, 2);
+/// ```
+pub const TEMPLATE_URL_BUTTONS_MAX: usize = 2;
+
+/// Maximum number of copy-code buttons in a template.
+///
+/// ```
+/// use meta_whatsapp::template::TEMPLATE_COPY_CODE_BUTTONS_MAX;
+/// assert_eq!(TEMPLATE_COPY_CODE_BUTTONS_MAX, 1);
+/// ```
+pub const TEMPLATE_COPY_CODE_BUTTONS_MAX: usize = 1;
+
+/// Maximum number of example parameters in one component.
+///
+/// ```
+/// use meta_whatsapp::template::TEMPLATE_EXAMPLES_MAX;
+/// assert_eq!(TEMPLATE_EXAMPLES_MAX, 20);
+/// ```
+pub const TEMPLATE_EXAMPLES_MAX: usize = 20;
+
+/// Maximum number of component groups in a template definition.
+///
+/// ```
+/// use meta_whatsapp::template::TEMPLATE_COMPONENTS_MAX;
+/// assert_eq!(TEMPLATE_COMPONENTS_MAX, 4);
+/// ```
+pub const TEMPLATE_COMPONENTS_MAX: usize = 4;
 
 /// Language block of a template: `code` plus optional `policy`.
 ///
@@ -81,10 +196,12 @@ impl TemplateLanguage {
             ));
         }
         let count = self.code.chars().count();
-        if count > 32 {
+        if count > TEMPLATE_LANGUAGE_MAX_CHARS {
             return Err(Error::validation(
                 "template.language.code",
-                format!("must be at most 32 characters, got {count}"),
+                format!(
+                    "must be at most {TEMPLATE_LANGUAGE_MAX_CHARS} characters, got {count}"
+                ),
             ));
         }
         if !self
@@ -257,7 +374,11 @@ impl TemplateParameter {
                         "must not be empty",
                     ));
                 }
-                require_max_bytes("template.parameters.text", text, 1024)
+                require_max_bytes(
+                    "template.parameters.text",
+                    text,
+                    TEMPLATE_PARAMETER_MAX_BYTES,
+                )
             }
             Self::Currency {
                 fallback_value,
@@ -678,7 +799,7 @@ impl TemplateMessage {
         if self.name.is_empty() {
             return Err(Error::validation("template.name", "must not be empty"));
         }
-        require_max_bytes("template.name", &self.name, 512)?;
+        require_max_bytes("template.name", &self.name, TEMPLATE_NAME_MAX_BYTES)?;
         self.language.validate()?;
         if self.components.len() > 3 {
             return Err(Error::validation(

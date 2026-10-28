@@ -8,7 +8,7 @@
 
 use libfuzzer_sys::fuzz_target;
 
-use meta_whatsapp::{ChangeValue, WebhookPayload};
+use meta_whatsapp::{AddressReply, ChangeValue, Order, WebhookPayload};
 
 fuzz_target!(|data: &[u8]| {
     let Ok(value) = serde_json::from_slice::<serde_json::Value>(data) else {
@@ -35,6 +35,12 @@ fuzz_target!(|data: &[u8]| {
     let _ = change.event();
     let _ = change.is_empty();
 
+    // Commerce payloads are parsed both standalone and as part of a webhook.
+    // The standalone path reaches `Order` and `AddressReply` even when the
+    // mutated JSON is not wrapped in a webhook envelope.
+    let _ = serde_json::from_slice::<Order>(data);
+    let _ = serde_json::from_slice::<AddressReply>(data);
+
     // The payload side: valid JSON of the wrong shape is an error, never a panic.
     let Ok(payload) = serde_json::from_slice::<WebhookPayload>(data) else {
         return;
@@ -43,6 +49,8 @@ fuzz_target!(|data: &[u8]| {
         let _ = phone_number_id.len();
         let _ = message.media();
         let _ = message.text_body();
+        let _ = message.order();
+        let _ = message.address();
         let _ = message.timestamp_secs();
     }
     for status in payload.statuses() {

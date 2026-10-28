@@ -114,3 +114,63 @@ async fn a_url_that_cannot_be_parsed_is_terminal() {
     assert_eq!(error.transport_phase(), Some(TransportPhase::Terminal));
     assert!(!error.is_retryable());
 }
+
+#[tokio::test]
+async fn a_response_body_at_the_limit_is_accepted() {
+    let base =
+        serve_once(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\nabcd").await;
+
+    let response = ReqwestTransport::new()
+        .with_max_response_bytes(4)
+        .execute(Request::get(&format!("{base}/messages"), "t"))
+        .await
+        .unwrap();
+    assert_eq!(response.body(), b"abcd");
+}
+
+#[tokio::test]
+async fn a_response_body_one_byte_over_the_limit_is_rejected() {
+    let base =
+        serve_once(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nabcde").await;
+
+    let error = ReqwestTransport::new()
+        .with_max_response_bytes(4)
+        .execute(Request::get(&format!("{base}/messages"), "t"))
+        .await
+        .unwrap_err();
+    assert_eq!(error.transport_phase(), Some(TransportPhase::AfterWrite));
+    assert!(error.is_ambiguous());
+    assert!(!error.is_retryable());
+    assert!(error.to_string().contains("4-byte limit"), "{error}");
+}
+
+#[tokio::test]
+async fn a_chunked_response_body_at_the_limit_is_accepted() {
+    let base = serve_once(
+        b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n4\r\nabcd\r\n0\r\n\r\n",
+    )
+    .await;
+
+    let response = ReqwestTransport::new()
+        .with_max_response_bytes(4)
+        .execute(Request::get(&format!("{base}/messages"), "t"))
+        .await
+        .unwrap();
+    assert_eq!(response.body(), b"abcd");
+}
+
+#[tokio::test]
+async fn a_chunked_response_body_one_byte_over_the_limit_is_rejected() {
+    let base = serve_once(
+        b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n5\r\nabcde\r\n0\r\n\r\n",
+    )
+    .await;
+
+    let error = ReqwestTransport::new()
+        .with_max_response_bytes(4)
+        .execute(Request::get(&format!("{base}/messages"), "t"))
+        .await
+        .unwrap_err();
+    assert_eq!(error.transport_phase(), Some(TransportPhase::AfterWrite));
+    assert!(error.to_string().contains("4-byte limit"), "{error}");
+}

@@ -26,6 +26,10 @@
 
 use serde_json::{json, Map, Value};
 
+use crate::commerce::{
+    AddressMessage, CatalogMessage, OrderDetailsMessage, OrderStatusMessage, ProductListMessage,
+    ProductMessage,
+};
 use crate::error::{Error, Result};
 use crate::media::MediaRef;
 use crate::template::TemplateMessage;
@@ -1639,7 +1643,7 @@ impl HeaderText {
         Self { text: text.into() }
     }
 
-    fn validate(&self) -> Result<()> {
+    pub(crate) fn validate(&self) -> Result<()> {
         require_non_empty("interactive.header.text", &self.text)?;
         require_max_chars("interactive.header.text", &self.text, HEADER_MAX_CHARS)
     }
@@ -2432,7 +2436,7 @@ impl FlowMessage {
     }
 }
 
-/// Any interactive message: buttons, list or flow.
+/// Any interactive message: buttons, list, flow, or a commerce payload.
 ///
 /// ```
 /// use meta_whatsapp::{InteractiveMessage, ListMessage, MessageRequest};
@@ -2442,7 +2446,7 @@ impl FlowMessage {
 /// // Validation still fails: a list needs at least one section.
 /// assert!(json.is_err());
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum InteractiveMessage {
     /// Up to three quick-reply buttons.
@@ -2451,10 +2455,22 @@ pub enum InteractiveMessage {
     List(ListMessage),
     /// `WhatsApp` Flow.
     Flow(FlowMessage),
+    /// Catalog opened from a product thumbnail.
+    Catalog(CatalogMessage),
+    /// One catalog product.
+    Product(ProductMessage),
+    /// Multiple catalog products grouped into sections.
+    ProductList(ProductListMessage),
+    /// Order details sent for review.
+    OrderDetails(OrderDetailsMessage),
+    /// Update to an earlier order-details message.
+    OrderStatus(OrderStatusMessage),
+    /// Request a delivery address from the customer.
+    Address(AddressMessage),
 }
 
 impl InteractiveMessage {
-    /// Which interactive kind this is (`button`, `list`, `flow`).
+    /// Which interactive kind this is (`button`, `list`, `flow`, ...).
     ///
     /// ```
     /// use meta_whatsapp::{FlowAction, FlowMessage, InteractiveMessage};
@@ -2468,6 +2484,12 @@ impl InteractiveMessage {
             Self::Buttons(_) => "button",
             Self::List(_) => "list",
             Self::Flow(_) => "flow",
+            Self::Catalog(_) => "catalog_message",
+            Self::Product(_) => "product",
+            Self::ProductList(_) => "product_list",
+            Self::OrderDetails(_) => "order_details",
+            Self::OrderStatus(_) => "order_status",
+            Self::Address(_) => "address_message",
         }
     }
 
@@ -2491,6 +2513,12 @@ impl InteractiveMessage {
             Self::Buttons(message) => message.validate(),
             Self::List(message) => message.validate(),
             Self::Flow(message) => message.validate(),
+            Self::Catalog(message) => message.validate(),
+            Self::Product(message) => message.validate(),
+            Self::ProductList(message) => message.validate(),
+            Self::OrderDetails(message) => message.validate(),
+            Self::OrderStatus(message) => message.validate(),
+            Self::Address(message) => message.validate(),
         }
     }
 
@@ -2499,6 +2527,12 @@ impl InteractiveMessage {
             Self::Buttons(message) => message.render(),
             Self::List(message) => message.render(),
             Self::Flow(message) => message.render(),
+            Self::Catalog(message) => message.render(),
+            Self::Product(message) => message.render(),
+            Self::ProductList(message) => message.render(),
+            Self::OrderDetails(message) => message.render(),
+            Self::OrderStatus(message) => message.render(),
+            Self::Address(message) => message.render(),
         }
     }
 }
@@ -2518,6 +2552,78 @@ impl From<ListMessage> for InteractiveMessage {
 impl From<FlowMessage> for InteractiveMessage {
     fn from(value: FlowMessage) -> Self {
         Self::Flow(value)
+    }
+}
+
+impl From<CatalogMessage> for InteractiveMessage {
+    fn from(value: CatalogMessage) -> Self {
+        Self::Catalog(value)
+    }
+}
+
+impl From<ProductMessage> for InteractiveMessage {
+    fn from(value: ProductMessage) -> Self {
+        Self::Product(value)
+    }
+}
+
+impl From<ProductListMessage> for InteractiveMessage {
+    fn from(value: ProductListMessage) -> Self {
+        Self::ProductList(value)
+    }
+}
+
+impl From<OrderDetailsMessage> for InteractiveMessage {
+    fn from(value: OrderDetailsMessage) -> Self {
+        Self::OrderDetails(value)
+    }
+}
+
+impl From<OrderStatusMessage> for InteractiveMessage {
+    fn from(value: OrderStatusMessage) -> Self {
+        Self::OrderStatus(value)
+    }
+}
+
+impl From<AddressMessage> for InteractiveMessage {
+    fn from(value: AddressMessage) -> Self {
+        Self::Address(value)
+    }
+}
+
+impl From<CatalogMessage> for MessageBody {
+    fn from(value: CatalogMessage) -> Self {
+        Self::Interactive(InteractiveMessage::Catalog(value))
+    }
+}
+
+impl From<ProductMessage> for MessageBody {
+    fn from(value: ProductMessage) -> Self {
+        Self::Interactive(InteractiveMessage::Product(value))
+    }
+}
+
+impl From<ProductListMessage> for MessageBody {
+    fn from(value: ProductListMessage) -> Self {
+        Self::Interactive(InteractiveMessage::ProductList(value))
+    }
+}
+
+impl From<OrderDetailsMessage> for MessageBody {
+    fn from(value: OrderDetailsMessage) -> Self {
+        Self::Interactive(InteractiveMessage::OrderDetails(value))
+    }
+}
+
+impl From<OrderStatusMessage> for MessageBody {
+    fn from(value: OrderStatusMessage) -> Self {
+        Self::Interactive(InteractiveMessage::OrderStatus(value))
+    }
+}
+
+impl From<AddressMessage> for MessageBody {
+    fn from(value: AddressMessage) -> Self {
+        Self::Interactive(InteractiveMessage::Address(value))
     }
 }
 
@@ -2541,14 +2647,14 @@ fn validate_optional_caption(field: &'static str, caption: Option<&str>) -> Resu
     }
 }
 
-fn require_non_empty(field: &'static str, value: &str) -> Result<()> {
+pub(crate) fn require_non_empty(field: &'static str, value: &str) -> Result<()> {
     if value.is_empty() {
         return Err(Error::validation(field, "must not be empty"));
     }
     Ok(())
 }
 
-fn require_max_bytes(field: &'static str, value: &str, max: usize) -> Result<()> {
+pub(crate) fn require_max_bytes(field: &'static str, value: &str, max: usize) -> Result<()> {
     if value.len() > max {
         return Err(Error::validation(
             field,
@@ -2558,7 +2664,7 @@ fn require_max_bytes(field: &'static str, value: &str, max: usize) -> Result<()>
     Ok(())
 }
 
-fn require_max_chars(field: &'static str, value: &str, max: usize) -> Result<()> {
+pub(crate) fn require_max_chars(field: &'static str, value: &str, max: usize) -> Result<()> {
     let count = value.chars().count();
     if count > max {
         return Err(Error::validation(
@@ -2569,7 +2675,7 @@ fn require_max_chars(field: &'static str, value: &str, max: usize) -> Result<()>
     Ok(())
 }
 
-fn require_no_controls(field: &'static str, value: &str) -> Result<()> {
+pub(crate) fn require_no_controls(field: &'static str, value: &str) -> Result<()> {
     if value.chars().any(char::is_control) {
         return Err(Error::validation(
             field,
