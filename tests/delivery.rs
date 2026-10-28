@@ -357,3 +357,189 @@ fn the_documented_rule_table_holds() {
         assert_eq!(policy.decide(attempt, send, 1), Action::Ambiguous);
     }
 }
+
+#[tokio::test]
+async fn a_5xx_on_a_lifecycle_write_is_single_shot_and_ambiguous() {
+    // #13: registering, deregistering and setting the PIN all change state
+    // permanently, so a 5xx must never be re-sent.
+    for name in [
+        "register",
+        "register_with_backup",
+        "deregister",
+        "set_two_step_verification_pin",
+    ] {
+        let transport = MockTransport::new();
+        for _ in 0..4 {
+            transport.push_response(response(500, &[], SERVER_ERROR));
+        }
+        let client = client(transport.clone()).with_retry(instant_retry(5));
+        let pin = meta_whatsapp::VerificationPin::new("123456").unwrap();
+        let backup = meta_whatsapp::RegistrationBackup::new("pw", "BLOB").unwrap();
+
+        let err = match name {
+            "register" => client.register(&pin).await.unwrap_err(),
+            "register_with_backup" => client
+                .register_with_backup(&pin, &backup)
+                .await
+                .unwrap_err(),
+            "deregister" => client.deregister().await.unwrap_err(),
+            _ => client
+                .set_two_step_verification_pin(&pin)
+                .await
+                .unwrap_err(),
+        };
+
+        assert!(err.is_ambiguous(), "{name}: {err:?}");
+        assert!(!err.is_retryable(), "{name}: {err:?}");
+        assert_eq!(transport.call_count(), 1, "{name} was re-sent");
+    }
+}
+
+#[tokio::test]
+async fn a_429_before_a_lifecycle_write_is_retried_and_succeeds() {
+    // Rate limiting happens before the write lands, so it is safe to retry.
+    for name in [
+        "register",
+        "register_with_backup",
+        "deregister",
+        "set_two_step_verification_pin",
+    ] {
+        let transport = MockTransport::new();
+        transport.push_response(response(
+            429,
+            &[("Retry-After", "0")],
+            b"{\"error\":{\"code\":4,\"message\":\"rate limited\"}}",
+        ));
+        transport.push_response(json_response(&serde_json::json!({ "success": true })));
+        let client = client(transport.clone()).with_retry(instant_retry(2));
+        let pin = meta_whatsapp::VerificationPin::new("123456").unwrap();
+        let backup = meta_whatsapp::RegistrationBackup::new("pw", "BLOB").unwrap();
+
+        let outcome = match name {
+            "register" => client.register(&pin).await.unwrap(),
+            "register_with_backup" => client.register_with_backup(&pin, &backup).await.unwrap(),
+            "deregister" => client.deregister().await.unwrap(),
+            _ => client.set_two_step_verification_pin(&pin).await.unwrap(),
+        };
+
+        assert!(outcome.success, "{name}");
+        assert_eq!(transport.call_count(), 2, "{name} should retry once");
+    }
+}
+
+#[tokio::test]
+async fn a_lifecycle_write_that_loses_the_answer_after_the_write_is_ambiguous() {
+    for name in [
+        "register",
+        "register_with_backup",
+        "deregister",
+        "set_two_step_verification_pin",
+    ] {
+        let transport = MockTransport::new();
+        transport.push(Reply::after_write("operation timed out"));
+        transport.push_response(json_response(&serde_json::json!({ "success": true })));
+        let client = client(transport.clone()).with_retry(instant_retry(3));
+        let pin = meta_whatsapp::VerificationPin::new("123456").unwrap();
+        let backup = meta_whatsapp::RegistrationBackup::new("pw", "BLOB").unwrap();
+
+        let err = match name {
+            "register" => client.register(&pin).await.unwrap_err(),
+            "register_with_backup" => client
+                .register_with_backup(&pin, &backup)
+                .await
+                .unwrap_err(),
+            "deregister" => client.deregister().await.unwrap_err(),
+            _ => client
+                .set_two_step_verification_pin(&pin)
+                .await
+                .unwrap_err(),
+        };
+
+        assert!(err.is_ambiguous(), "{name}: {err:?}");
+        assert_eq!(transport.call_count(), 1, "{name} was re-sent");
+    }
+}
+
+#[tokio::test]
+async fn a_failure_before_the_write_leaves_the_lifecycle_call_retryable() {
+    // The request never left, so the caller's own retry cannot double-apply.
+    for name in ["register", "deregister", "set_two_step_verification_pin"] {
+        let transport = MockTransport::new();
+        transport.push(Reply::not_sent("connection refused"));
+        transport.push_response(json_response(&serde_json::json!({ "success": true })));
+        let client = client(transport.clone()).with_retry(instant_retry(2));
+        let pin = meta_whatsapp::VerificationPin::new("123456").unwrap();
+
+        let outcome = match name {
+            "register" => client.register(&pin).await.unwrap(),
+            "deregister" => client.deregister().await.unwrap(),
+            _ => client.set_two_step_verification_pin(&pin).await.unwrap(),
+        };
+
+        assert!(outcome.success, "{name}");
+        assert_eq!(transport.call_count(), 2, "{name}");
+    }
+}
+
+#[tokio::test]
+async fn deregister_is_not_idempotent_even_though_delete_is() {
+    // `RetryPolicy::of_method` maps DELETE to idempotent. Deregistration is the
+    // exception the client has to opt out of: a second DELETE can come back
+    // "already deregistered" as an error, so it is surfaced, not replayed.
+    assert_eq!(
+        Repeatability::of_method(meta_whatsapp::transport::Method::Delete),
+        Repeatability::Idempotent,
+        "the generic method rule is unchanged"
+    );
+
+    let transport = MockTransport::new();
+    for _ in 0..3 {
+        transport.push_response(response(500, &[], SERVER_ERROR));
+    }
+    let client = client(transport.clone()).with_retry(instant_retry(3));
+
+    let err = client.deregister().await.unwrap_err();
+
+    assert!(err.is_ambiguous(), "{err:?}");
+    assert_eq!(transport.call_count(), 1);
+    let call = &transport.calls()[0];
+    assert_eq!(call.method, meta_whatsapp::transport::Method::Delete);
+}
+
+#[tokio::test]
+async fn concurrent_lifecycle_writes_each_get_their_own_verdict() {
+    // 32 tasks on one cloned client: no shared state, no extra attempts.
+    let transport = MockTransport::new();
+    for _ in 0..64 {
+        transport.push_response(response(500, &[], SERVER_ERROR));
+    }
+    let client = Arc::new(client(transport.clone()).with_retry(instant_retry(3)));
+
+    let mut handles = Vec::new();
+    for index in 0..32 {
+        let client = Arc::clone(&client);
+        handles.push(tokio::spawn(async move {
+            let pin = meta_whatsapp::VerificationPin::new("123456").unwrap();
+            let err = match index % 4 {
+                0 => client.register(&pin).await.unwrap_err(),
+                1 => client.deregister().await.unwrap_err(),
+                2 => client
+                    .set_two_step_verification_pin(&pin)
+                    .await
+                    .unwrap_err(),
+                _ => client
+                    .register_with_backup(
+                        &pin,
+                        &meta_whatsapp::RegistrationBackup::new("pw", "BLOB").unwrap(),
+                    )
+                    .await
+                    .unwrap_err(),
+            };
+            assert!(err.is_ambiguous(), "{err:?}");
+        }));
+    }
+    for handle in handles {
+        handle.await.unwrap();
+    }
+    assert_eq!(transport.call_count(), 32, "one call per task, no retries");
+}

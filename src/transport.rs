@@ -7,6 +7,7 @@
 //! socket.
 
 use std::collections::BTreeMap;
+use std::fmt;
 use std::time::Duration;
 
 use serde_json::Value;
@@ -64,7 +65,7 @@ impl Method {
 /// assert_eq!(request.method, Method::Post);
 /// assert!(matches!(request.body, RequestBody::Json(_)));
 /// ```
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy)]
 #[non_exhaustive]
 pub enum RequestBody<'a> {
     /// No body (GET, DELETE).
@@ -73,6 +74,23 @@ pub enum RequestBody<'a> {
     Json(&'a Value),
     /// `multipart/form-data`, encoded by [`MediaUpload::encode`].
     Multipart(&'a MediaUpload),
+}
+
+impl fmt::Debug for RequestBody<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // The JSON body of a register or two-step verification call carries a
+        // PIN; a transport that logs its requests must not log that.
+        match self {
+            Self::Empty => f.write_str("Empty"),
+            Self::Json(value) => f.debug_tuple("Json").field(&redacted_body(value)).finish(),
+            Self::Multipart(upload) => f
+                .debug_struct("Multipart")
+                .field("filename", &upload.filename)
+                .field("mime_type", &upload.mime_type)
+                .field("len", &upload.data.len())
+                .finish(),
+        }
+    }
 }
 
 /// A single HTTP call, transport agnostic.
@@ -88,7 +106,21 @@ pub enum RequestBody<'a> {
 /// assert_eq!(request.token, "EAAG");
 /// assert_eq!(request.timeout.unwrap().as_secs(), 5);
 /// ```
-#[derive(Debug, Clone, Copy)]
+///
+/// `Debug` prints neither the token nor a secret body field, so a transport
+/// can log a whole request:
+///
+/// ```
+/// use meta_whatsapp::transport::Request;
+///
+/// let body = serde_json::json!({"messaging_product": "whatsapp", "pin": "123456"});
+/// let request = Request::post_json("https://graph.facebook.com/v21.0/1/register", "EAAG", &body);
+/// let logged = format!("{request:?}");
+/// assert!(!logged.contains("EAAG"), "the access token stays out of the log");
+/// assert!(!logged.contains("123456"), "and so does the PIN");
+/// assert!(logged.contains("[redacted]"), "{logged}");
+/// ```
+#[derive(Clone, Copy)]
 pub struct Request<'a> {
     /// Verb to use.
     pub method: Method,
@@ -100,6 +132,53 @@ pub struct Request<'a> {
     pub timeout: Option<Duration>,
     /// Request body.
     pub body: RequestBody<'a>,
+}
+
+impl fmt::Debug for Request<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Request")
+            .field("method", &self.method)
+            .field("url", &self.url)
+            .field("token", &"[redacted]")
+            .field("timeout", &self.timeout)
+            .field("body", &self.body)
+            .finish()
+    }
+}
+
+/// Body keys whose values are secrets: a PIN, an app secret, an access token.
+/// Whatever sits under one of these keys is replaced before a body is printed.
+const SECRET_BODY_KEYS: &[&str] = &[
+    "pin",
+    "password",
+    "backup",
+    "token",
+    "access_token",
+    "verify_token",
+    "app_secret",
+];
+
+/// Deep-copies `value`, replacing every secret field with `[redacted]`.
+fn redacted_body(value: &Value) -> Value {
+    match value {
+        Value::Object(object) => Value::Object(
+            object
+                .iter()
+                .map(|(key, child)| {
+                    (
+                        key.clone(),
+                        if SECRET_BODY_KEYS.contains(&key.as_str()) {
+                            Value::String("[redacted]".to_string())
+                        } else {
+                            redacted_body(child)
+                        },
+                    )
+                })
+                .collect(),
+        ),
+        Value::Array(items) => Value::Array(items.iter().map(redacted_body).collect()),
+        other => other.clone(),
+    }
 }
 
 impl<'a> Request<'a> {

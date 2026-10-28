@@ -18,6 +18,8 @@ Secondary sources — the developer reference pages the spec links to:
 * Cloud API overview: `https://developers.facebook.com/docs/whatsapp/cloud-api`
 * Webhooks / subscription setup: `https://developers.facebook.com/docs/whatsapp/cloud-api/guides/set-up-webhooks`
 * Block users: `https://developers.facebook.com/docs/business-messaging/whatsapp/block-users`
+* Phone-number registration / deregistration: `https://developers.facebook.com/docs/whatsapp/cloud-api/reference` (the `/{PHONE_NUMBER_ID}/register` and `/{PHONE_NUMBER_ID}/deregister` edges)
+* Two-step verification PIN: `https://developers.facebook.com/docs/whatsapp/cloud-api/reference/two-step-verification`
 * Quality rating background: `https://www.facebook.com/business/help/896873687365001`
 
 ## Endpoints used
@@ -32,6 +34,9 @@ Secondary sources — the developer reference pages the spec links to:
 | `business_profile` | `GET /{phone-number-id}/whatsapp_business_profile` | `/{Version}/{Phone-Number-ID}/whatsapp_business_profile` |
 | `update_business_profile` | `POST /{phone-number-id}/whatsapp_business_profile` | same |
 | `phone_number_info`, `phone_number_info_with` | `GET /{phone-number-id}?fields=…` | `/{Version}/{Phone-Number-ID}` |
+| `register`, `register_with_backup` | `POST /{phone-number-id}/register` | `/{Version}/{Phone-Number-ID}/register` |
+| `deregister` | `DELETE /{phone-number-id}/deregister` | `/{Version}/{Phone-Number-ID}/deregister` |
+| `set_two_step_verification_pin` | `POST /{phone-number-id}` (body `{"pin":"…"}`) | `/{Version}/{Phone-Number-ID}` |
 | `blocked_users` | `GET /{phone-number-id}/block_users` | `/{Version}/{Phone-Number-ID}/block_users` |
 | `block_users` | `POST /{phone-number-id}/block_users` | same |
 | `unblock_users` | `DELETE /{phone-number-id}/block_users` | same |
@@ -49,6 +54,10 @@ Secondary sources — the developer reference pages the spec links to:
 | `MessagingLimitTier` | `WhatsAppAccountNumber.messaging_limit_tier` | TIER_50, TIER_250, TIER_1K, TIER_10K, TIER_100K, TIER_UNLIMITED. |
 | `BlockedUser` / `BlockedUsersPage` | `GetBlockedUsersData`, `BlockedUser` | `data[]` plus `paging`. |
 | `BlockOutcome` | `BlockUsersData` (`added_users`), `UnblockUsersData` (`removed_users`), `BlockedUserOperation` | Same payload shape for POST and DELETE; ids travel in the body. |
+| `SuccessOutcome` | register / deregister / two-step responses (`success`) | `success` is documented as a boolean; missing, `1`/`0` and `"true"`/`"1"` also decode — see *unverified*, README. Unknown fields land in `extra`. |
+| `VerificationPin` | two-step verification reference | exactly 6 ASCII digits, checked before allocation. `Debug`/`Display` are fixed redacted text; no getter, no `Default`, equality is constant time. |
+| `RegistrationBackup` | register edge (`backup{password,data}`) | on-premises migration blob; the OpenAPI description does not pin the shape down — see *unverified*, README. |
+| `RegisterRequest` / `TwoStepVerificationRequest` | register edge, two-step reference | register sends `messaging_product` + `pin` (+ optional `backup`); two-step sends `pin` alone. |
 | `WebhookSubscriptions` / `SubscribedApp` | `SubscribedAppsResponse`, `SubscribedApp` | Each entry may wrap the app in `whatsapp_business_api_data` (spec example) — both parse. |
 | `SubscriptionConfig` | `SubscriptionRequest` | `override_callback_uri`, `verify_token`. |
 | `BusinessUseCaseUsage` / `UseCaseUsage` | header `x-business-use-case-usage` | Header value is a JSON object keyed by business id, each value an array of `{type, call_count, total_cputime, total_time, estimated_time_to_regain_access}`. |
@@ -62,6 +71,9 @@ Secondary sources — the developer reference pages the spec links to:
   `MessagingLimitTier::Unknown` and the string-typed `vertical`, `name_status`
   and `account_mode` keep whatever Meta sends, so a new value cannot break a
   deployment.
+* **Two-step verification is set, never disabled.** `POST /{PHONE_NUMBER_ID}` with a `pin` is the only write the reference offers; there is no endpoint to turn two-step verification off, so this crate exposes `set_two_step_verification_pin` (rotation) and no `disable`.
+* **The two-step body carries `pin` alone.** Unlike `register`, the reference does not send `messaging_product` there, so neither do we.
+* **`deregister` is treated as non-idempotent even though it is a `DELETE`.** `Repeatability::of_method` calls `DELETE` idempotent, which is right for reads like `delete_media` but wrong here: a repeated deregistration is a state change the caller has to see, so `deregister` overrides the verb rule and a 5xx surfaces as `Error::Ambiguous` instead of being re-sent.
 * **No field-level webhook subscription.** The WABA node has no
   `subscribed_fields`; that parameter belongs to the app-level
   `/{app_id}/subscriptions` endpoint, which is out of scope (README).

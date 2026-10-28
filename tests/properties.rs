@@ -4,9 +4,9 @@
 use std::time::Duration;
 
 use meta_whatsapp::business::{
-    block_users_payload, validate_block_user, validate_field_list, BusinessProfile,
-    BusinessProfileUpdate, MessagingLimitTier, QualityRating, BLOCK_USER_MAX_DIGITS,
-    BLOCK_USER_MIN_DIGITS,
+    block_users_payload, validate_block_user, validate_field_list, validate_verification_pin,
+    BusinessProfile, BusinessProfileUpdate, MessagingLimitTier, QualityRating, SuccessOutcome,
+    VerificationPin, BLOCK_USER_MAX_DIGITS, BLOCK_USER_MIN_DIGITS, VERIFICATION_PIN_LEN,
 };
 use meta_whatsapp::media::{validate_media_id, MAX_MEDIA_ID_LEN};
 use meta_whatsapp::retry::{Action, Attempt, Repeatability};
@@ -474,6 +474,62 @@ proptest! {
             prop_assert_eq!(&payload["about"], &Value::String(about.clone()));
             prop_assert!(payload.get("address").is_none());
             prop_assert!(payload["websites"][0].is_string());
+        }
+    }
+
+    /// The PIN gate is exactly "six ASCII digits": a string passes
+    /// `validate_verification_pin` if and only if the predicate holds, so no
+    /// surprising spelling of a PIN ever gets through and none gets locked out.
+    #[test]
+    fn the_pin_rule_is_exactly_six_ascii_digits(raw in ".{0,12}") {
+        let expected = raw.chars().count() == VERIFICATION_PIN_LEN
+            && raw.bytes().all(|byte| byte.is_ascii_digit());
+        prop_assert_eq!(
+            validate_verification_pin(&raw).is_ok(),
+            expected,
+            "the function disagreed for raw: {:?}",
+            raw
+        );
+        prop_assert_eq!(
+            VerificationPin::new(&raw).is_ok(),
+            expected,
+            "the type and the function must agree for raw: {:?}",
+            raw
+        );
+        if !expected && raw.len() >= 2 && raw.bytes().all(|byte| byte.is_ascii_digit()) {
+            let message = validate_verification_pin(&raw).unwrap_err().to_string();
+            prop_assert!(!message.contains(&raw), "the value leaked: {}", message);
+        }
+    }
+
+    /// Six ASCII digits always build, and the value never shows up in a
+    /// rendered form of the type.
+    #[test]
+    fn a_valid_pin_builds_and_stays_redacted(digits in "[0-9]{6}") {
+        let pin = VerificationPin::new(&digits)?;
+        prop_assert_eq!(&format!("{pin:?}"), "VerificationPin([redacted])");
+        prop_assert_eq!(&format!("{pin}"), "6-digit PIN (redacted)");
+        prop_assert_eq!(pin.clone(), VerificationPin::try_from(digits.clone())?);
+        let request = meta_whatsapp::RegisterRequest::new(&pin);
+        prop_assert_eq!(&request.to_json()["pin"], &Value::String(digits.clone()));
+        prop_assert!(!format!("{request:?}").contains(&digits), "the PIN leaked into Debug");
+    }
+
+    /// Success decoding is total: it either produces an outcome or a payload
+    /// error, and it only ever succeeds for an object.
+    #[test]
+    fn success_outcome_parsing_is_total(value in arb_json()) {
+        match SuccessOutcome::from_value(&value) {
+            Ok(outcome) => {
+                prop_assert!(value.is_object(), "non-object accepted: {}", value);
+                prop_assert!(!outcome.extra.contains_key("success"));
+                prop_assert!(!outcome.extra.contains_key("messaging_product"));
+            }
+            Err(err) => prop_assert!(
+                matches!(err, Error::Payload(_)),
+                "only a payload error may result: {:?}",
+                err
+            ),
         }
     }
 }
