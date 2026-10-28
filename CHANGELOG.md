@@ -9,7 +9,19 @@ of the README.
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+- Catalog, product and product-list messages: `CatalogMessage`,
+  `ProductMessage`, `ProductListMessage`, product sections/items, and the same
+  outbound/inbound limits (30 products across 10 sections, 24-character titles,
+  100-character ids, 60-character header/footer and 1024-byte body).
+- Order messages: `OrderDetailsMessage`, `OrderStatusMessage`, shared `Order`
+  and `OrderItem` types, typed durable statuses, and inbound order parsing with
+  numeric-string tolerance for quantity and price.
+- Address messages: `AddressMessage`, typed pre-filled fields and saved
+  addresses, plus `AddressReply` parsing from both interactive and top-level
+  address blocks.
+- `Message::order()` and `Message::address()` accessors for inbound commerce
+  payloads; unknown values survive in typed `extra` maps.
 
 ## [0.1.5] - 2026-10-27
 

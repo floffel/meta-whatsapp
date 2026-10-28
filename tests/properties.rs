@@ -14,7 +14,8 @@ use meta_whatsapp::subscription::{validate_waba_id, WebhookSubscriptions};
 use meta_whatsapp::transport::Method;
 use meta_whatsapp::usage::BusinessUseCaseUsage;
 use meta_whatsapp::{
-    Error, MessageRequest, RetryPolicy, TemplateQuery, TextMessage, WebhookPayload, WebhookVerifier,
+    AddressFieldType, Error, MessageRequest, OrderStatus, ProductMessage, RetryPolicy,
+    TemplateQuery, TextMessage, WebhookPayload, WebhookVerifier,
 };
 use percent_encoding::percent_decode_str;
 use proptest::prelude::*;
@@ -119,6 +120,25 @@ proptest! {
             .to_json()
             .is_ok();
         prop_assert_eq!(accepted, !text.is_empty() && text.len() <= 4096);
+    }
+
+    /// Commerce interactive bodies use the same 1..=1024-byte rule as captions.
+    #[test]
+    fn product_body_acceptance_matches_the_documented_boundary(text in ".{0,1100}") {
+        let accepted = MessageRequest::new("4915112345678", ProductMessage::new("c", "p").body(&text))
+            .to_json()
+            .is_ok();
+        prop_assert_eq!(accepted, !text.is_empty() && text.len() <= 1024);
+    }
+
+    /// Commerce enums carry every wire spelling and never lose an unknown one.
+    #[test]
+    fn commerce_enums_round_trip(raw in ".{0,40}") {
+        let status = OrderStatus::from_wire(raw.clone());
+        prop_assert_eq!(OrderStatus::from_wire(status.as_str()), status);
+
+        let field_type = AddressFieldType::from_wire(raw);
+        prop_assert_eq!(AddressFieldType::from_wire(field_type.as_str()), field_type);
     }
 
     /// A media id is accepted only if it survives the charset/length rules, and

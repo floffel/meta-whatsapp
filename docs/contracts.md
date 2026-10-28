@@ -19,6 +19,7 @@ Secondary sources — the developer reference pages the spec links to:
 * Webhooks / subscription setup: `https://developers.facebook.com/docs/whatsapp/cloud-api/guides/set-up-webhooks`
 * Block users: `https://developers.facebook.com/docs/business-messaging/whatsapp/block-users`
 * Quality rating background: `https://www.facebook.com/business/help/896873687365001`
+* Commerce messages: `https://developers.facebook.com/docs/whatsapp/cloud-api/guides/send-messages`
 
 ## Endpoints used
 
@@ -52,6 +53,10 @@ Secondary sources — the developer reference pages the spec links to:
 | `WebhookSubscriptions` / `SubscribedApp` | `SubscribedAppsResponse`, `SubscribedApp` | Each entry may wrap the app in `whatsapp_business_api_data` (spec example) — both parse. |
 | `SubscriptionConfig` | `SubscriptionRequest` | `override_callback_uri`, `verify_token`. |
 | `BusinessUseCaseUsage` / `UseCaseUsage` | header `x-business-use-case-usage` | Header value is a JSON object keyed by business id, each value an array of `{type, call_count, total_cputime, total_time, estimated_time_to_regain_access}`. |
+| `CatalogMessage` | `message.catalog` | `type: "catalog"` carrying `thumbnail_product_retailer_id`; the catalog itself is inferred from the business account. |
+| `ProductMessage` / `ProductListMessage` / `ProductSection` / `ProductItem` | `message.interactive` (`product`, `product_list`) | Single-product action has `catalog_id` + `product_retailer_id`; multi-product action has `catalog_id` + `sections[].product_items[]`. Limits: 30 products, 10 sections, 24-character section titles, 100-character ids, 60-character header/footer and 1024-byte body. |
+| `Order` / `OrderItem` / `OrderDetailsMessage` / `OrderStatusMessage` | inbound `message.order`; outbound `interactive` (`order_details`, `order_status`) | Order details use action `review_order` with `reference_id` + `order`; status updates use action `order_status` with `reference_id` + `order.status`/`order.description`. Limits: 30 line items and 35-character reference ids. `OrderStatus::Unknown` carries future spellings. |
+| `AddressMessage` / `AddressField` / `SavedAddress` / `AddressReply` | outbound `interactive` (`address_message`); inbound `interactive.address_message` | Parameters carry a two-letter `country`, `values[]` (`type`, `name`, `value`) and `saved_addresses[]` (`id`, `value`). Limits: 20 values and 10 saved addresses. The reply parser also accepts a top-level `address` block. |
 
 ## Deliberate divergences
 
@@ -60,8 +65,12 @@ Secondary sources — the developer reference pages the spec links to:
   all documented variants instead of picking one and failing on the other.
 * **Unknown enum values are carried, not rejected.** `QualityRating::Unknown`,
   `MessagingLimitTier::Unknown` and the string-typed `vertical`, `name_status`
-  and `account_mode` keep whatever Meta sends, so a new value cannot break a
-  deployment.
+  and `account_mode`, plus `OrderStatus::Unknown` and
+  `AddressFieldType::Unknown`, keep whatever Meta sends, so a new value cannot
+  break a deployment.
+* **Commerce numbers are permissive.** Inbound order quantities and prices
+  accept both JSON numbers and numeric strings. Unknown keys survive in the
+  corresponding `extra` maps, and unknown address fields are not discarded.
 * **No field-level webhook subscription.** The WABA node has no
   `subscribed_fields`; that parameter belongs to the app-level
   `/{app_id}/subscriptions` endpoint, which is out of scope (README).
