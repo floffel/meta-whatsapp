@@ -21,11 +21,13 @@ use meta_whatsapp::template::{
 };
 use meta_whatsapp::usage::{BusinessUseCaseUsage, UseCaseUsage};
 use meta_whatsapp::{
-    AudioMessage, ButtonMessage, ContactCard, ContactName, ContactOrg, ContactsMessage,
-    DocumentMessage, EmailType, Error, FlowAction, FlowMessage, FlowMode, HeaderText, ImageMessage,
-    InteractiveMessage, ListMessage, ListRow, ListSection, LocationMessage,
-    MediaBytes as ReexportedMediaBytes, MessageBody, PhoneType, ReactionMessage, RecipientType,
-    ReplyButton, StickerMessage, TemplateMessage, TextMessage, UrlType, VideoMessage,
+    AddressMessage, AudioMessage, ButtonMessage, CatalogMessage, ContactCard, ContactName,
+    ContactOrg, ContactsMessage, DocumentMessage, EmailType, Error, FlowAction, FlowMessage,
+    FlowMode, HeaderText, ImageMessage, InteractiveMessage, ListMessage, ListRow, ListSection,
+    LocationMessage, MediaBytes as ReexportedMediaBytes, MessageBody, Order, OrderDetailsMessage,
+    OrderItem, OrderStatus, OrderStatusMessage, PhoneType, ProductItem, ProductListMessage,
+    ProductMessage, ProductSection, ReactionMessage, RecipientType, ReplyButton, StickerMessage,
+    TemplateMessage, TextMessage, UrlType, VideoMessage,
 };
 
 #[test]
@@ -56,6 +58,26 @@ fn every_body_reports_its_wire_type() {
             "interactive",
         ),
         (TemplateMessage::new("t", "de").into(), "template"),
+        (CatalogMessage::new("p").into(), "catalog"),
+        (ProductMessage::new("c", "p").into(), "interactive"),
+        (
+            ProductListMessage::new("c", vec![ProductSection::new(vec![ProductItem::new("p")])])
+                .into(),
+            "interactive",
+        ),
+        (
+            OrderDetailsMessage::new(
+                "r",
+                Order::new("c", vec![OrderItem::new("p", 1, 1.0, "EUR")]),
+            )
+            .into(),
+            "interactive",
+        ),
+        (
+            OrderStatusMessage::new("r", OrderStatus::Shipped).into(),
+            "interactive",
+        ),
+        (AddressMessage::new("DE").into(), "interactive"),
     ];
     for (body, expected) in cases {
         assert_eq!(body.message_type(), expected);
@@ -86,6 +108,22 @@ fn enum_spellings_cover_every_variant() {
     assert_eq!(TemplateButtonType::CopyCode.as_str(), "copy_code");
     assert_eq!(FlowMode::Draft.as_str(), "draft");
     assert_eq!(FlowMode::Published.as_str(), "published");
+    assert_eq!(OrderStatus::Pending.as_str(), "pending");
+    assert_eq!(OrderStatus::Processing.as_str(), "processing");
+    assert_eq!(OrderStatus::PartiallyShipped.as_str(), "partially_shipped");
+    assert_eq!(OrderStatus::Shipped.as_str(), "shipped");
+    assert_eq!(OrderStatus::Completed.as_str(), "completed");
+    assert_eq!(OrderStatus::Canceled.as_str(), "canceled");
+    assert_eq!(OrderStatus::Cancelled.as_str(), "cancelled");
+    assert_eq!(OrderStatus::Unknown("new".into()).as_str(), "new");
+    assert_eq!(meta_whatsapp::AddressFieldType::Name.as_str(), "name");
+    assert_eq!(meta_whatsapp::AddressFieldType::Address.as_str(), "address");
+    assert_eq!(meta_whatsapp::AddressFieldType::Phone.as_str(), "phone");
+    assert_eq!(meta_whatsapp::AddressFieldType::Email.as_str(), "email");
+    assert_eq!(
+        meta_whatsapp::AddressFieldType::Unknown("new".into()).as_str(),
+        "new"
+    );
     assert!(matches!(
         FlowAction::navigate("screen"),
         FlowAction::Navigate { .. }

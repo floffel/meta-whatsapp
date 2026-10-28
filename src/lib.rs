@@ -7,9 +7,10 @@
 //!   replay window, and parse the payload into types (message events, status
 //!   events, and unknown future events).
 //! * [`client`] — send every message family (text, media, location, contacts,
-//!   reaction, interactive buttons/list/flow, templates), upload/download/delete
-//!   media, list templates, and administer the account (business profile,
-//!   phone-number quality and limits, blocklist, webhook subscriptions).
+//!   reaction, interactive buttons/list/flow/product/order/address, catalogs,
+//!   templates), upload/download/delete media, list templates, and administer
+//!   the account (business profile, phone-number quality and limits, blocklist,
+//!   webhook subscriptions).
 //! * [`business`], [`subscription`], [`usage`] — the typed shapes behind that
 //!   administration surface, including Meta's `X-Business-Use-Case-Usage`
 //!   budget header.
@@ -85,6 +86,7 @@
 
 pub mod business;
 pub mod client;
+pub mod commerce;
 pub mod error;
 pub mod media;
 pub mod message;
@@ -101,6 +103,15 @@ pub use business::{
     BusinessProfileUpdate, MessagingLimitTier, PhoneNumberInfo, QualityRating,
 };
 pub use client::{SendOutcome, WhatsAppClient, DEFAULT_API_VERSION};
+pub use commerce::{
+    AddressField, AddressFieldType, AddressMessage, AddressReply, AddressType, AddressValue,
+    CatalogMessage, Order, OrderDetailsMessage, OrderItem, OrderMessage, OrderStatus,
+    OrderStatusMessage, ProductItem, ProductListMessage, ProductMessage, ProductSection,
+    SavedAddress, ADDRESS_FIELD_NAME_MAX_CHARS, ADDRESS_ID_MAX_CHARS, ADDRESS_SAVED_MAX,
+    ADDRESS_VALUES_MAX, CATALOG_ID_MAX_CHARS, ORDER_ITEMS_MAX, ORDER_REFERENCE_ID_MAX_CHARS,
+    PRODUCTS_MAX, PRODUCT_RETAILER_ID_MAX_CHARS, PRODUCT_SECTIONS_MAX,
+    PRODUCT_SECTION_TITLE_MAX_CHARS,
+};
 pub use error::{Error, Result, TransportPhase};
 pub use media::{MediaBytes, MediaInfo, MediaRef, MediaUpload};
 pub use message::{
