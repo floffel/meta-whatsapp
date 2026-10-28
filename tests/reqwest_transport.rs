@@ -145,9 +145,61 @@ async fn a_response_body_one_byte_over_the_limit_is_rejected() {
 }
 
 #[tokio::test]
+async fn an_empty_response_body_at_a_zero_limit_is_accepted() {
+    let base =
+        serve_once(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await;
+
+    let response = ReqwestTransport::new()
+        .with_max_response_bytes(0)
+        .execute(Request::get(&format!("{base}/messages"), "t"))
+        .await
+        .unwrap();
+    assert!(response.body().is_empty());
+}
+
+#[tokio::test]
+async fn a_nonempty_response_body_at_a_zero_limit_is_rejected() {
+    let base =
+        serve_once(b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\nConnection: close\r\n\r\nx").await;
+
+    let error = ReqwestTransport::new()
+        .with_max_response_bytes(0)
+        .execute(Request::get(&format!("{base}/messages"), "t"))
+        .await
+        .unwrap_err();
+    assert_eq!(error.transport_phase(), Some(TransportPhase::AfterWrite));
+    assert!(error.to_string().contains("0-byte limit"), "{error}");
+}
+
+#[tokio::test]
+async fn a_close_delimited_body_at_the_limit_is_accepted() {
+    let base = serve_once(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nabcd").await;
+
+    let response = ReqwestTransport::new()
+        .with_max_response_bytes(4)
+        .execute(Request::get(&format!("{base}/messages"), "t"))
+        .await
+        .unwrap();
+    assert_eq!(response.body(), b"abcd");
+}
+
+#[tokio::test]
+async fn a_close_delimited_body_one_byte_over_the_limit_is_rejected() {
+    let base = serve_once(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nabcde").await;
+
+    let error = ReqwestTransport::new()
+        .with_max_response_bytes(4)
+        .execute(Request::get(&format!("{base}/messages"), "t"))
+        .await
+        .unwrap_err();
+    assert_eq!(error.transport_phase(), Some(TransportPhase::AfterWrite));
+    assert!(error.to_string().contains("4-byte limit"), "{error}");
+}
+
+#[tokio::test]
 async fn a_chunked_response_body_at_the_limit_is_accepted() {
     let base = serve_once(
-        b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n4\r\nabcd\r\n0\r\n\r\n",
+        b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n2\r\nab\r\n2\r\ncd\r\n0\r\n\r\n",
     )
     .await;
 
@@ -162,7 +214,7 @@ async fn a_chunked_response_body_at_the_limit_is_accepted() {
 #[tokio::test]
 async fn a_chunked_response_body_one_byte_over_the_limit_is_rejected() {
     let base = serve_once(
-        b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n5\r\nabcde\r\n0\r\n\r\n",
+        b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n2\r\nab\r\n3\r\ncde\r\n0\r\n\r\n",
     )
     .await;
 

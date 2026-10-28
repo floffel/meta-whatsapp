@@ -88,7 +88,6 @@ pub mod business;
 pub mod client;
 pub mod commerce;
 pub mod error;
-pub mod flow;
 pub mod media;
 pub mod message;
 pub mod retry;
@@ -111,14 +110,6 @@ pub use commerce::{
     SavedAddress,
 };
 pub use error::{Error, Result, TransportPhase};
-pub use flow::{
-    FlowDecryptedRequest, FlowEncryptedRequest, FlowEncryptedResponse, FlowEndpoint,
-    FlowExchangeAction, FlowReply, FlowRequest, FlowResponse, NfmReply, AES_KEY_BYTES,
-    FLOW_DATA_EXCHANGE_VERSION, FLOW_DATA_MAX_BYTES, FLOW_ERROR_MESSAGE_MAX_BYTES,
-    FLOW_PRIVATE_KEY_MAX_BYTES, FLOW_RESPONSE_JSON_MAX_BYTES, FLOW_RSA_MIN_BITS,
-    FLOW_SCREEN_MAX_CHARS, FLOW_TOKEN_MAX_BYTES, FLOW_VERSION_MAX_CHARS, GCM_TAG_BYTES,
-    INITIAL_VECTOR_BYTES,
-};
 pub use media::{MediaBytes, MediaInfo, MediaRef, MediaUpload};
 pub use message::{
     AudioMessage, ButtonMessage, ContactCard, ContactEmail, ContactName, ContactOrg, ContactPhone,

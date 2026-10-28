@@ -36,8 +36,7 @@
 //! # Ok::<(), meta_whatsapp::Error>(())
 //! ```
 
-use serde::de::Error as _;
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::error::{Error, Result};

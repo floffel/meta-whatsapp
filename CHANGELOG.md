@@ -27,8 +27,8 @@ of the README.
   `DEFAULT_MAX_RESPONSE_BYTES`, is 100 MiB so the largest supported media
   download still fits. A missing or misleading `Content-Length` cannot bypass
   the cap, and an oversized body is an after-write transport error. Tests cover
-  both sides of the limit for declared-length and chunked responses. Closes
-  #11.
+  both sides of the limit for declared-length, chunked, close-delimited and
+  zero-byte responses. Closes #11.
 
 ## [0.1.5] - 2026-10-27
 

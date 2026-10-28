@@ -31,6 +31,9 @@ use serde_json::{json, Map, Value};
 
 use crate::error::{Error, Result};
 use crate::media::MediaRef;
+use crate::message::{
+    require_max_bytes, require_max_chars, require_no_controls, require_non_empty,
+};
 
 /// Maximum UTF-8 byte length of a template name.
 ///
@@ -143,6 +146,14 @@ pub const TEMPLATE_EXAMPLES_MAX: usize = 20;
 /// assert_eq!(TEMPLATE_COMPONENTS_MAX, 4);
 /// ```
 pub const TEMPLATE_COMPONENTS_MAX: usize = 4;
+
+/// Maximum number of digits in a template id.
+///
+/// ```
+/// use meta_whatsapp::template::TEMPLATE_ID_MAX_DIGITS;
+/// assert_eq!(TEMPLATE_ID_MAX_DIGITS, 32);
+/// ```
+pub const TEMPLATE_ID_MAX_DIGITS: usize = 32;
 
 /// Language block of a template: `code` plus optional `policy`.
 ///

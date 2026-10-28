@@ -16,13 +16,14 @@ use crate::error::TransportPhase;
 use crate::error::{Error, Result};
 use crate::media::MediaUpload;
 
-/// HTTP verb. Only the three the Cloud API needs.
+/// HTTP verb used by the Cloud API.
 ///
 /// ```
 /// use meta_whatsapp::transport::Method;
 ///
 /// assert_eq!(Method::Post.as_str(), "POST");
 /// assert_eq!(Method::Get.as_str(), "GET");
+/// assert_eq!(Method::Put.as_str(), "PUT");
 /// assert_eq!(Method::Delete.as_str(), "DELETE");
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -32,6 +33,8 @@ pub enum Method {
     Get,
     /// Send a message or upload media.
     Post,
+    /// Replace a resource (phone-number lifecycle settings).
+    Put,
     /// Remove uploaded media.
     Delete,
 }
@@ -48,6 +51,7 @@ impl Method {
         match self {
             Self::Get => "GET",
             Self::Post => "POST",
+            Self::Put => "PUT",
             Self::Delete => "DELETE",
         }
     }
@@ -134,6 +138,27 @@ impl<'a> Request<'a> {
     pub fn post_json(url: &'a str, token: &'a str, body: &'a Value) -> Self {
         Self {
             method: Method::Post,
+            url,
+            token,
+            timeout: None,
+            body: RequestBody::Json(body),
+        }
+    }
+
+    /// A PUT with a JSON body.
+    ///
+    /// ```
+    /// use meta_whatsapp::transport::{Method, Request};
+    ///
+    /// let body = serde_json::json!({"messaging_product": "whatsapp"});
+    /// let request = Request::put_json("https://x.test/a", "t", &body);
+    /// assert_eq!(request.method, Method::Put);
+    /// assert_eq!(request.body_json().unwrap()["messaging_product"], "whatsapp");
+    /// ```
+    #[must_use]
+    pub fn put_json(url: &'a str, token: &'a str, body: &'a Value) -> Self {
+        Self {
+            method: Method::Put,
             url,
             token,
             timeout: None,
@@ -415,7 +440,10 @@ pub trait Transport {
 
 /// `reqwest`-based transport, enabled by default via the `http` feature.
 ///
-/// The client is cheap to clone and safe to share across tasks.
+/// The client is cheap to clone and safe to share across tasks. Response bodies
+/// are buffered only up to [`DEFAULT_MAX_RESPONSE_BYTES`]; use
+/// [`ReqwestTransport::with_max_response_bytes`] when an endpoint is known to
+/// return less.
 ///
 /// ```no_run
 /// # #[cfg(feature = "http")]
@@ -486,7 +514,7 @@ impl ReqwestTransport {
     /// next chunk would exceed this many bytes. A `Content-Length` above the
     /// cap is rejected before the body is allocated. The default already fits
     /// the largest supported document; lower it when the response is known to
-    /// be small.
+    /// be small. A limit of zero accepts only an empty response body.
     ///
     /// ```
     /// # #[cfg(feature = "http")]
@@ -528,6 +556,7 @@ impl Transport for ReqwestTransport {
         let mut builder = match request.method {
             Method::Get => self.client.get(request.url),
             Method::Post => self.client.post(request.url),
+            Method::Put => self.client.put(request.url),
             Method::Delete => self.client.delete(request.url),
         };
         builder = builder.bearer_auth(request.token);
@@ -590,16 +619,31 @@ async fn read_body(response: &mut reqwest::Response, limit: usize) -> Result<Vec
         .await
         .map_err(|error| describe_reqwest_error(&error))?
     {
-        let total = body
-            .len()
-            .checked_add(chunk.len())
-            .ok_or_else(|| response_too_large(limit))?;
-        if total > limit {
-            return Err(response_too_large(limit));
-        }
-        body.extend_from_slice(&chunk);
+        append_chunk(&mut body, &chunk, limit)?;
     }
     Ok(body)
+}
+
+/// Appends one response chunk while keeping both the body length and the
+/// vector's capacity at or below `limit`.
+///
+/// Capacity grows geometrically so a large chunked body does not reallocate on
+/// every frame, but the final allocation is clamped to the configured ceiling.
+/// The body is left unchanged when the chunk would cross that ceiling.
+#[cfg(feature = "http")]
+fn append_chunk(body: &mut Vec<u8>, chunk: &[u8], limit: usize) -> Result<()> {
+    let total = body
+        .len()
+        .checked_add(chunk.len())
+        .filter(|total| *total <= limit)
+        .ok_or_else(|| response_too_large(limit))?;
+
+    if total > body.capacity() {
+        let target = body.capacity().saturating_mul(2).max(total).min(limit);
+        body.reserve_exact(target - body.len());
+    }
+    body.extend_from_slice(chunk);
+    Ok(())
 }
 
 /// Whether a wire length cannot fit in `limit` bytes on this target.
@@ -668,9 +712,36 @@ mod tests {
     use super::*;
 
     #[test]
-    fn response_lengths_stop_at_the_boundary() {
+    fn declared_lengths_stop_at_the_boundary() {
+        assert!(!length_exceeds(0, 0));
+        assert!(length_exceeds(1, 0));
         assert!(!length_exceeds(4, 4));
         assert!(length_exceeds(5, 4));
+        assert!(!length_exceeds(
+            DEFAULT_MAX_RESPONSE_BYTES as u64,
+            DEFAULT_MAX_RESPONSE_BYTES
+        ));
+        assert!(length_exceeds(
+            DEFAULT_MAX_RESPONSE_BYTES as u64 + 1,
+            DEFAULT_MAX_RESPONSE_BYTES
+        ));
+    }
+
+    #[test]
+    fn chunk_bytes_stop_at_the_boundary_even_between_chunks() {
+        let mut body = Vec::new();
+        assert!(append_chunk(&mut body, b"ab", 4).is_ok());
+        assert!(append_chunk(&mut body, b"cd", 4).is_ok());
+        assert_eq!(body, b"abcd");
+        assert!(body.capacity() <= 4);
+
+        assert!(append_chunk(&mut body, b"e", 4).is_err());
+        assert_eq!(body, b"abcd", "a rejected chunk must not be appended");
+
+        let mut empty = Vec::new();
+        assert!(append_chunk(&mut empty, b"", 0).is_ok());
+        assert!(append_chunk(&mut empty, b"x", 0).is_err());
+        assert!(empty.is_empty());
     }
 
     #[test]
