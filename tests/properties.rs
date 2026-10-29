@@ -645,15 +645,24 @@ proptest! {
     }
 
     /// Rendering is lossless: whatever went in comes back out of the JSON,
-    /// including non-ASCII text and every documented key.
+    /// including non-ASCII text and every documented key. An empty form is the
+    /// one exception — `values` is omitted rather than sent as `{}`.
     #[test]
     fn address_values_survive_the_wire(values in arb_address_values()) {
         let message = AddressMessage::new("IN", "body").values(values.clone());
         let Ok(json) = MessageRequest::new("919876543210", message).to_json() else {
             return Err(TestCaseError::fail("valid values must render"));
         };
-        let rendered = json["interactive"]["action"]["parameters"]["values"].clone();
-        let decoded: AddressValues = serde_json::from_value(rendered)?;
+        let parameters = &json["interactive"]["action"]["parameters"];
+        let decoded = if let Some(rendered) = parameters.get("values") {
+            serde_json::from_value::<AddressValues>(rendered.clone())?
+        } else {
+            prop_assert!(
+                values.is_empty(),
+                "only an empty form may be omitted, got {values:?}"
+            );
+            AddressValues::new()
+        };
         prop_assert_eq!(decoded, values);
     }
 

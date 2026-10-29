@@ -309,7 +309,7 @@ cargo test --no-default-features    # same, without reqwest/tokio
 cargo clippy --all-targets --all-features -- -D warnings
 cargo doc --no-deps
 cargo deny check
-cargo llvm-cov --all-features --summary-only   # 96.3 % lines, gate at 95 %
+cargo llvm-cov --all-features --summary-only   # 96.8 % lines, gate at 95 %
 cargo fuzz run webhook_payload      # nightly; one target per parser, see below
 ```
 
