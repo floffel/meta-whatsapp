@@ -9,7 +9,34 @@ of the README.
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+- The `WhatsApp` Flows round trip. An inbound `interactive.nfm_reply` parses into
+  a typed `FlowReply` (`flow_token`, `flow_name`, the decoded `response_json` and
+  the wire object in `raw`) instead of a raw `serde_json::Value`, and
+  `WebhookPayload::flow_replies()` / `Message::flow_reply()` hand it out.
+  `response_json` arrives stringified and is decoded once; a document that is not
+  JSON is kept verbatim instead of failing the webhook, and a parsed reply
+  re-serialises to exactly what Meta sent. Closes #8.
+- `FlowAction::navigate_with(screen, data)` for a `navigate` action that
+  pre-fills the first screen, and `FlowMessage::flow_message_version(…)` to
+  override the message version (default `"3"`, the only one Meta documents).
+- `flow::{FLOW_MESSAGE_VERSION, FLOW_TOKEN_MAX_BYTES, FLOW_CTA_MAX_CHARS,
+  FLOW_SCREEN_MAX_CHARS, validate_screen_name, validate_screen_data}`.
+- `tests/flow.rs`: the send → reply round trip over the mock transport, and the
+  boundary pair (just inside / just outside) for the CTA, token, screen-id and
+  screen-data limits. Two new properties cover the decoder and every limit for
+  arbitrary input; the fuzz target now walks the flow replies too.
+
+### Changed
+- `FlowMessage::validate` checks the screen id shape (`[A-Za-z0-9_-]`, at most 64
+  characters) and requires screen `data` to be a non-empty JSON object, per the
+  request schema. The CTA stays required — the OpenAPI schema lists `flow_cta`
+  under `required` — with its 30-character limit.
+- An empty `flow_token` is no longer rendered as `""`; the field is omitted so
+  Meta's `unused` default applies.
+- `InteractiveReply::nfm_reply` is typed as `Option<FlowReply>` instead of
+  `Option<serde_json::Value>`; `FlowReply::raw` still holds everything the old
+  field carried.
 
 ## [0.1.5] - 2026-10-27
 

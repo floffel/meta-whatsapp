@@ -1,7 +1,7 @@
 //! Typed client and webhook toolkit for the
 //! [WhatsApp Cloud API](https://developers.facebook.com/docs/whatsapp/cloud-api).
 //!
-//! Three independent parts:
+//! Four independent parts:
 //!
 //! * [`webhook`] — verify `X-Hub-Signature-256` in constant time, enforce a
 //!   replay window, and parse the payload into types (message events, status
@@ -10,6 +10,9 @@
 //!   reaction, interactive buttons/list/flow, templates), upload/download/delete
 //!   media, list templates, and administer the account (business profile,
 //!   phone-number quality and limits, blocklist, webhook subscriptions).
+//! * [`flow`] — the `WhatsApp` Flows round trip: the decoded `nfm_reply` a
+//!   finished flow sends back, plus the limits the flow message is checked
+//!   against before it goes out.
 //! * [`business`], [`subscription`], [`usage`] — the typed shapes behind that
 //!   administration surface, including Meta's `X-Business-Use-Case-Usage`
 //!   budget header.
@@ -86,6 +89,7 @@
 pub mod business;
 pub mod client;
 pub mod error;
+pub mod flow;
 pub mod media;
 pub mod message;
 pub mod retry;
@@ -102,6 +106,10 @@ pub use business::{
 };
 pub use client::{SendOutcome, WhatsAppClient, DEFAULT_API_VERSION};
 pub use error::{Error, Result, TransportPhase};
+pub use flow::{
+    validate_screen_data, validate_screen_name, FlowReply, FLOW_CTA_MAX_CHARS,
+    FLOW_MESSAGE_VERSION, FLOW_SCREEN_MAX_CHARS, FLOW_TOKEN_MAX_BYTES,
+};
 pub use media::{MediaBytes, MediaInfo, MediaRef, MediaUpload};
 pub use message::{
     AudioMessage, ButtonMessage, ContactCard, ContactEmail, ContactName, ContactOrg, ContactPhone,

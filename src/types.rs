@@ -28,6 +28,8 @@
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
 
+use crate::flow::FlowReply;
+
 /// Top level webhook envelope.
 ///
 /// ```
@@ -399,9 +401,29 @@ impl Message {
         self.text.as_ref().map(|text| text.body.as_str())
     }
 
+    /// The flow reply, when this message is the `nfm_reply` of a finished flow.
+    ///
+    /// ```rust
+    /// use meta_whatsapp::Message;
+    ///
+    /// let message: Message = serde_json::from_str(
+    ///     r#"{"id":"1","from":"2","type":"interactive","interactive":{"type":"nfm_reply",
+    ///         "nfm_reply":{"name":"flow","body":"Sent",
+    ///                      "response_json":"{\"screen\":\"SUMMARY\",\"data\":{\"ok\":true}}"}}}"#,
+    /// ).unwrap();
+    /// let reply = message.flow_reply().unwrap();
+    /// assert_eq!(reply.screen(), Some("SUMMARY"));
+    /// ```
+    #[must_use]
+    pub fn flow_reply(&self) -> Option<&FlowReply> {
+        self.interactive
+            .as_ref()
+            .and_then(|interactive| interactive.nfm_reply.as_ref())
+    }
+
     /// `timestamp` parsed as unix seconds.
     ///
-    /// ```
+    /// ```rust
     /// use meta_whatsapp::Message;
     ///
     /// let message: Message = serde_json::from_str(
@@ -558,7 +580,10 @@ pub struct Reaction {
 
 /// Reply to an interactive message.
 ///
-/// ```
+/// A flow reply (`type == "nfm_reply"`) is decoded into [`FlowReply`] here, so
+/// the stringified `response_json` does not have to be parsed again downstream.
+///
+/// ```rust
 /// use meta_whatsapp::types::InteractiveReply;
 ///
 /// let reply: InteractiveReply = serde_json::from_str(
@@ -578,9 +603,9 @@ pub struct InteractiveReply {
     /// List selection.
     #[serde(default)]
     pub list_reply: Option<ReplyRef>,
-    /// Flow response payload.
+    /// Flow response (`type == "nfm_reply"`), decoded from `response_json`.
     #[serde(default)]
-    pub nfm_reply: Option<Value>,
+    pub nfm_reply: Option<FlowReply>,
 }
 
 /// The id/title pair echoed for a button or list selection.
@@ -770,6 +795,29 @@ impl WebhookPayload {
             .iter()
             .flat_map(|e| e.changes.iter())
             .flat_map(|c| c.value.statuses.iter())
+    }
+
+    /// Iterates every flow reply in the payload, already decoded.
+    ///
+    /// ```rust
+    /// use meta_whatsapp::WebhookPayload;
+    ///
+    /// let payload: WebhookPayload = serde_json::from_str(
+    ///     r#"{"object":"whatsapp_business_account","entry":[{"id":"1","changes":[{"field":"messages","value":{
+    ///         "metadata":{"display_phone_number":"1","phone_number_id":"2"},
+    ///         "messages":[{"id":"m","from":"3","type":"interactive","timestamp":"1",
+    ///             "interactive":{"type":"nfm_reply","nfm_reply":{"name":"flow",
+    ///                 "response_json":"{\"flow_token\":\"t-1\",\"screen\":\"DONE\"}"}}}]}}]}]}"#,
+    /// ).unwrap();
+    /// let tokens: Vec<_> = payload.flow_replies().filter_map(|r| r.flow_token.as_deref()).collect();
+    /// assert_eq!(tokens, ["t-1"]);
+    /// ```
+    pub fn flow_replies(&self) -> impl Iterator<Item = &FlowReply> {
+        self.entry
+            .iter()
+            .flat_map(|entry| entry.changes.iter())
+            .flat_map(|change| change.value.messages.iter())
+            .filter_map(Message::flow_reply)
     }
 
     /// Iterates every change, including non-message events.
