@@ -106,11 +106,35 @@ validates before rendering, so an invalid message never reaches the network.
 | location | `LocationMessage` | range- and `NaN`-checked |
 | contacts | `ContactsMessage` + `ContactCard` | name, phones, e-mails, org, URLs, birthday |
 | reaction | `ReactionMessage` | empty emoji removes a reaction |
-| interactive | `ButtonMessage`, `ListMessage`, `FlowMessage` | 1–3 buttons, 1–10 list rows, flows |
+| interactive | `ButtonMessage`, `ListMessage`, `FlowMessage` | 1–3 buttons, 1–10 list rows, flows (`navigate` / `data_exchange`) |
 | template | `TemplateMessage` | text/currency/date-time/media parameters, header/body/button merges |
 
 Envelope-level features: reply context (`context.message_id`),
 `biz_opaque_callback_data`, and `recipient_type`.
+
+## Flows
+
+`FlowMessage` sends a flow: `navigate` (optionally pre-filled with a `{screen, data}`
+object) or `data_exchange` for endpoint-powered flows. Everything is validated
+before the wire — `flow_cta` ≤ 30 characters, `flow_token` ≤ 1024 bytes, a screen
+id of ASCII letters/digits/`_`/`-` up to 64 characters, and screen `data` a
+non-empty JSON object. The message version defaults to Meta's `"3"`; an empty
+token is left off the request so Meta's `unused` default applies.
+
+The answer arrives as `interactive.nfm_reply`, whose `response_json` is a
+*stringified* JSON document. The parser decodes it once:
+
+```rust
+let reply = payload.flow_replies().next().expect("a flow reply");
+assert_eq!(reply.flow_token.as_deref(), Some("order-42"));   // echoed token
+assert_eq!(reply.screen(), Some("SUMMARY"));                 // last screen
+let slot = reply.data().and_then(|data| data.get("slot"));    // collected values
+```
+
+`FlowReply::raw` keeps the wire object, so a document that is not JSON degrades to
+the string Meta sent instead of failing the webhook, and a parsed reply
+re-serialises to exactly what arrived. `Message::flow_reply()` does the same for a
+single message.
 
 ## Media
 
@@ -187,6 +211,8 @@ with a token the API just rejected.
 * Both `changes[].value` shapes parse: message/status events with typed fields,
   and account-level events (`message_template_status_update`,
   `phone_number_quality_update`, …) whose keys land in `ChangeValue::extra`.
+* `interactive.nfm_reply` parses into `FlowReply` (`payload.flow_replies()`), with
+  the stringified `response_json` decoded once.
 * Unknown fields survive in `extra`; unknown `type` strings stay strings;
   duplicate *known* keys are rejected with a typed JSON error instead of being
   guessed at.
@@ -246,9 +272,10 @@ this section when its issue closes.
 * **Catalog / product / order / address messages** — issue #7. Commerce
   payloads with their own schema churn; `MessageBody` stays `#[non_exhaustive]`
   so they can land without a breaking release.
-* **Flow data-exchange endpoints** — issue #8. Until then the inbound
-  `nfm_reply` payload is passed through raw (`InteractiveReply::nfm_reply`);
-  decrypting and serving flows is a server concern, not a client one.
+* **The rest of the Flows API** — issues #27 (flow asset upload), #28 (the
+  data-exchange encryption endpoints: public key, decrypt) and #29 (Flow preview
+  and get). The message/reply round trip is covered above; decrypting and serving
+  a flow endpoint is a server concern, not a client one.
 * **App-level webhook field subscription** (`/{app_id}/subscriptions`) and
   registering the callback URL itself — issue #9.
 * **WABA-level phone-number listing / onboarding** (`GET|POST /{waba_id}/phone_numbers`,
@@ -266,7 +293,7 @@ cargo test --no-default-features    # same, without reqwest/tokio
 cargo clippy --all-targets --all-features -- -D warnings
 cargo doc --no-deps
 cargo deny check
-cargo llvm-cov --all-features --summary-only   # 96.3 % lines, gate at 95 %
+cargo llvm-cov --all-features --summary-only   # 96.9 % lines, gate at 95 %
 cargo fuzz run webhook_payload      # nightly; one target per parser, see below
 ```
 
@@ -287,7 +314,7 @@ The suite has five layers:
   matches the documented boundary, backoff stays bounded, queries stay
   percent-encoded, and "no non-idempotent request is retried after a 5xx" holds
   for every status, budget and attempt count.
-* **Doctest** — every public item has a runnable example (403 doctests).
+* **Doctest** — every public item has a runnable example (420 doctests).
 * **Fuzz** (`fuzz/`, nightly) — one libFuzzer target per parser, each pinning the
   invariant it protects instead of only "does not panic":
   * `webhook_payload` — arbitrary JSON through the permissive parser; a key the

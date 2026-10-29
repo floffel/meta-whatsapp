@@ -52,6 +52,8 @@ Secondary sources — the developer reference pages the spec links to:
 | `WebhookSubscriptions` / `SubscribedApp` | `SubscribedAppsResponse`, `SubscribedApp` | Each entry may wrap the app in `whatsapp_business_api_data` (spec example) — both parse. |
 | `SubscriptionConfig` | `SubscriptionRequest` | `override_callback_uri`, `verify_token`. |
 | `BusinessUseCaseUsage` / `UseCaseUsage` | header `x-business-use-case-usage` | Header value is a JSON object keyed by business id, each value an array of `{type, call_count, total_cputime, total_time, estimated_time_to_regain_access}`. |
+| `FlowMessage` / `FlowAction` | `interactive.action.parameters` of the flow variant | `flow_message_version` enum `["3"]`; `flow_cta` required, `maxLength: 30`; `flow_id` xor `flow_name`; `mode` ∈ {draft, published}, default published; `flow_token` defaults to `"unused"`; `flow_action` ∈ {navigate, data_exchange}, default navigate; `flow_action_payload` (`{screen, data}`) only with navigate, `data` a non-empty object. The Flows guide *Send a Flow message* (updated 2026-06-16) adds that the 30-character CTA length is advice, not a hard limit. |
+| `FlowReply` | not in the spec — webhook shape | Flows guide *Flows Webhooks*: `interactive.nfm_reply.{name, body, response_json}`, with `response_json` a JSON **document inside a string** and the flow token inside that document. |
 
 ## Deliberate divergences
 
@@ -65,3 +67,12 @@ Secondary sources — the developer reference pages the spec links to:
 * **No field-level webhook subscription.** The WABA node has no
   `subscribed_fields`; that parameter belongs to the app-level
   `/{app_id}/subscriptions` endpoint, which is out of scope (README).
+* **Flow identifiers are bounded by this crate, not by Meta.** Neither
+  `flow_token` (1024 bytes) nor a screen id (64 characters, `[A-Za-z0-9_-]`) has
+  a documented maximum; the caps keep a request from carrying an unbounded
+  identifier. Whether a well-formed screen exists in the flow is Meta's answer,
+  not ours.
+* **`nfm_reply` is decoded once.** `response_json` arrives stringified;
+  `FlowReply` parses it and keeps the wire object in `FlowReply::raw`, so a
+  malformed document degrades to that string instead of failing the webhook —
+  and a parsed reply re-serialises to exactly what Meta sent.

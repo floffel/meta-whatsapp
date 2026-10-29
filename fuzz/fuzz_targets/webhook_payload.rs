@@ -45,6 +45,20 @@ fuzz_target!(|data: &[u8]| {
         let _ = message.text_body();
         let _ = message.timestamp_secs();
     }
+    // A flow reply is decoded from a stringified document: the accessors must
+    // stay total whatever that string holds, and the wire object must survive.
+    for reply in payload.flow_replies() {
+        let _ = reply.flow_token.as_deref();
+        let _ = reply.flow_name.as_deref();
+        let _ = reply.screen();
+        let _ = reply.data().map(|data| data.len());
+        let _ = reply.get("screen");
+        assert_eq!(
+            serde_json::to_value(reply).expect("serialising a reply cannot fail"),
+            reply.raw,
+            "a decoded reply must serialise back to the object Meta sent"
+        );
+    }
     for status in payload.statuses() {
         let _ = status.timestamp_secs();
     }

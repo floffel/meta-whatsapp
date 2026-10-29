@@ -8,17 +8,19 @@ use meta_whatsapp::business::{
     BusinessProfileUpdate, MessagingLimitTier, QualityRating, BLOCK_USER_MAX_DIGITS,
     BLOCK_USER_MIN_DIGITS,
 };
+use meta_whatsapp::flow::{FLOW_CTA_MAX_CHARS, FLOW_SCREEN_MAX_CHARS, FLOW_TOKEN_MAX_BYTES};
 use meta_whatsapp::media::{validate_media_id, MAX_MEDIA_ID_LEN};
 use meta_whatsapp::retry::{Action, Attempt, Repeatability};
 use meta_whatsapp::subscription::{validate_waba_id, WebhookSubscriptions};
 use meta_whatsapp::transport::Method;
 use meta_whatsapp::usage::BusinessUseCaseUsage;
 use meta_whatsapp::{
-    Error, MessageRequest, RetryPolicy, TemplateQuery, TextMessage, WebhookPayload, WebhookVerifier,
+    Error, FlowAction, FlowMessage, FlowReply, MessageRequest, RetryPolicy, TemplateQuery,
+    TextMessage, WebhookPayload, WebhookVerifier,
 };
 use percent_encoding::percent_decode_str;
 use proptest::prelude::*;
-use serde_json::{Map, Value};
+use serde_json::{json, Map, Value};
 
 /// Arbitrary JSON values, deep enough to hit nesting but bounded.
 fn arb_json() -> impl Strategy<Value = Value> {
@@ -475,6 +477,57 @@ proptest! {
             prop_assert!(payload.get("address").is_none());
             prop_assert!(payload["websites"][0].is_string());
         }
+    }
+
+    /// A flow reply decodes every response document, keeps it verbatim, and
+    /// serialises back to exactly the object Meta sent.
+    #[test]
+    fn flow_replies_decode_every_response_document(value in arb_json()) {
+        let rendered = value.to_string();
+        // Compare against what the wire document decodes to, not against the
+        // in-memory float: `serde_json`'s number parser and Rust's are one ulp
+        // apart for a few extreme exponents, and the string is the contract.
+        let document: Value = serde_json::from_str(&rendered).unwrap();
+        let nfm = json!({
+            "name": "flow",
+            "body": "Sent",
+            "response_json": rendered,
+        });
+        let reply: FlowReply = serde_json::from_value(nfm.clone()).unwrap();
+
+        prop_assert_eq!(&reply.response_json, &document);
+        prop_assert_eq!(serde_json::to_value(&reply).unwrap(), nfm);
+        prop_assert_eq!(
+            reply.get("screen").and_then(Value::as_str),
+            document.get("screen").and_then(Value::as_str)
+        );
+        prop_assert_eq!(
+            reply.data(),
+            document.get("data").and_then(Value::as_object)
+        );
+    }
+
+    /// The flow message accepts exactly the values the documented arithmetic
+    /// allows: CTA up to 30 characters, token up to 1024 bytes, screen id up to
+    /// 64 characters of the identifier alphabet.
+    #[test]
+    fn flow_message_acceptance_matches_the_documented_boundaries(
+        token in ".{0,1100}",
+        cta in ".{0,40}",
+        screen in ".{0,80}",
+    ) {
+        let message = FlowMessage::new("f", cta.clone(), FlowAction::navigate(screen.clone()))
+            .flow_token(token.clone());
+        let accepted = message.validate().is_ok();
+        let expected = !cta.is_empty()
+            && cta.chars().count() <= FLOW_CTA_MAX_CHARS
+            && token.len() <= FLOW_TOKEN_MAX_BYTES
+            && !screen.is_empty()
+            && screen.chars().count() <= FLOW_SCREEN_MAX_CHARS
+            && screen
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-');
+        prop_assert_eq!(accepted, expected, "cta={:?} screen={:?} token_len={}", cta, screen, token.len());
     }
 }
 
