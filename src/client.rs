@@ -179,7 +179,8 @@ impl<T: Transport> WhatsAppClient<T> {
     }
 
     /// Replaces the retry policy (default: three attempts, 250 ms doubling to
-    /// an 8 s ceiling, `Retry-After` honoured).
+    /// an 8 s ceiling). `Retry-After` is honoured exactly; a hint above the
+    /// ceiling surfaces the original error instead of retrying early.
     ///
     /// ```
     /// use meta_whatsapp::RetryPolicy;
@@ -1187,9 +1188,10 @@ impl<T: Transport> WhatsAppClient<T> {
     /// non-idempotent request is not, because the message may already have been
     /// delivered. That case surfaces as [`Error::Ambiguous`].
     ///
-    /// The loop is bounded by `policy.max_attempts`; every wait is capped and
-    /// `tokio::time::sleep` is cancellation safe, so dropping the future stops
-    /// the retries immediately.
+    /// The loop is bounded by `policy.max_attempts`. A `Retry-After` longer
+    /// than `policy.max_delay` surfaces the original error instead of retrying
+    /// early, and `tokio::time::sleep` is cancellation safe, so dropping the
+    /// future stops the retries immediately.
     async fn execute(&self, request: Request<'_>) -> Result<Response> {
         self.execute_with(request, Repeatability::of_method(request.method))
             .await

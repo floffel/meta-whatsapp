@@ -18,9 +18,13 @@ of the README.
   both `interactive.address_message` and top-level `address` payloads.
 - `tests/commerce.rs` covers every wire shape and both sides of every limit;
   the existing `webhook_payload` fuzz target exercises the inbound parsers.
-  Closes #7.
+  Closes #7, #19, #20 and #21.
 
 ### Fixed
+- A `Retry-After` longer than `RetryPolicy::max_delay` is no longer shortened to
+  the ceiling and retried early. The original error is surfaced with the full
+  hint available from `Error::retry_after()`; `max_delay` still caps locally
+  computed backoff. Closes #14.
 - `ReqwestTransport` no longer buffers an unbounded response body. It reads
   chunk by chunk and stops as soon as the configured
   `max_response_bytes` would be exceeded; the default,

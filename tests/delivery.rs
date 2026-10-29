@@ -127,7 +127,8 @@ async fn the_retry_after_header_sets_the_wait() {
         ),
         Action::Retry(Duration::from_secs(2))
     );
-    // Clamped to the ceiling, so a hostile hint cannot park the caller.
+    // A hint above the ceiling is surfaced, so a hostile hint cannot park the
+    // caller and is never shortened into an early retry.
     assert_eq!(
         policy.decide(
             Attempt::RateLimited {
@@ -136,8 +137,41 @@ async fn the_retry_after_header_sets_the_wait() {
             Repeatability::NotIdempotent,
             1
         ),
-        Action::Retry(policy.max_delay)
+        Action::Surface
     );
+}
+
+#[tokio::test]
+async fn a_retry_after_above_max_delay_is_surfaced_without_retrying() {
+    let transport = MockTransport::new();
+    transport.push_response(response(
+        429,
+        &[("Retry-After", "2")],
+        b"{\"error\":{\"code\":4,\"message\":\"rate limited\"}}",
+    ));
+    transport.push_response(accepted("must-not-be-used"));
+    let policy = RetryPolicy::new(2)
+        .with_base_delay(Duration::ZERO)
+        .with_max_delay(Duration::from_secs(1));
+    let client = client(transport.clone()).with_retry(policy);
+
+    let err = client.send_text("1", "hi").await.unwrap_err();
+
+    assert_eq!(transport.call_count(), 1, "the hint forbids an early retry");
+    assert_eq!(err.retry_after(), Some(Duration::from_secs(2)));
+    match &err {
+        Error::Api {
+            status,
+            retry_after,
+            retryable,
+            ..
+        } => {
+            assert_eq!(*status, 429);
+            assert_eq!(*retry_after, Some(Duration::from_secs(2)));
+            assert!(*retryable);
+        }
+        other => panic!("expected the original API error, got {other:?}"),
+    }
 }
 
 /// The wrapper the client hands the caller must classify through its cause:

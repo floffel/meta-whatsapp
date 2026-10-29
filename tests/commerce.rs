@@ -31,6 +31,13 @@ fn assert_rejected(body: impl Into<MessageBody>, field: &'static str) {
     }
 }
 
+fn assert_field_error(result: Result<(), Error>, field: &'static str) {
+    match result {
+        Err(Error::Validation { field: actual, .. }) => assert_eq!(actual, field),
+        other => panic!("expected a validation error for {field}, got {other:?}"),
+    }
+}
+
 fn assert_accepted(body: impl Into<MessageBody>) -> Value {
     match request(body).to_json() {
         Ok(value) => value,
@@ -93,13 +100,59 @@ async fn catalog_message_uses_the_interactive_catalog_shape() {
 }
 
 #[tokio::test]
+async fn product_message_uses_the_interactive_product_shape() {
+    let transport = MockTransport::new();
+    let client = client(transport.clone());
+    client
+        .send(&request(
+            ProductMessage::new("catalog-1", "sku-1")
+                .body("Single origin")
+                .footer("Ships tomorrow"),
+        ))
+        .await
+        .expect("product should send");
+
+    let call = transport.only_call();
+    assert_eq!(call.method.as_str(), "POST");
+    assert!(call.url.ends_with("/messages"));
+    assert_eq!(
+        json_body(&call),
+        &json!({
+            "messaging_product": "whatsapp",
+            "recipient_type": "individual",
+            "to": "4915112345678",
+            "type": "interactive",
+            "interactive": {
+                "type": "product",
+                "body": {"text": "Single origin"},
+                "footer": {"text": "Ships tomorrow"},
+                "action": {
+                    "catalog_id": "catalog-1",
+                    "product_retailer_id": "sku-1",
+                },
+            },
+        }),
+    );
+}
+
+#[tokio::test]
 async fn invalid_commerce_never_reaches_the_transport() {
     let transport = MockTransport::new();
     let client = client(transport.clone());
 
-    let result = client.send(&request(AddressMessage::new("de"))).await;
+    let address = client.send(&request(AddressMessage::new("de"))).await;
+    let product = client
+        .send(&request(ProductMessage::new("catalog-1", "")))
+        .await;
 
-    assert!(matches!(result, Err(Error::Validation { .. })));
+    assert!(matches!(address, Err(Error::Validation { .. })));
+    assert!(matches!(
+        product,
+        Err(Error::Validation {
+            field: "interactive.action.product_retailer_id",
+            ..
+        })
+    ));
     assert_eq!(transport.call_count(), 0);
 }
 
@@ -264,6 +317,40 @@ fn inbound_order_parses_numeric_strings_aliases_and_unknowns() {
 }
 
 #[test]
+fn inbound_order_accessor_requires_the_order_type() {
+    let matching: Message = serde_json::from_value(json!({
+        "id": "m1",
+        "from": "3",
+        "type": "order",
+        "order": {"catalog_id": "c", "product_items": []},
+    }))
+    .expect("order message should parse");
+    assert!(matching.order().is_some());
+
+    for message_type in ["text", "interactive", "order_status"] {
+        let mismatched: Message = serde_json::from_value(json!({
+            "id": "m1",
+            "from": "3",
+            "type": message_type,
+            "order": {"catalog_id": "c", "product_items": []},
+        }))
+        .expect("mismatched message should parse permissively");
+        assert!(
+            mismatched.order().is_none(),
+            "{message_type} must not expose an order payload",
+        );
+    }
+
+    let missing: Message = serde_json::from_value(json!({
+        "id": "m1",
+        "from": "3",
+        "type": "order",
+    }))
+    .expect("order message without the payload should parse");
+    assert!(missing.order().is_none());
+}
+
+#[test]
 fn inbound_address_parses_from_interactive_and_top_levels() {
     let interactive: Message = serde_json::from_str(
         r#"{"id":"m1","from":"3","type":"interactive","interactive":{
@@ -352,6 +439,95 @@ fn product_and_catalog_ids_stop_at_100_characters() {
 }
 
 #[test]
+fn product_message_omits_an_unset_footer_and_enforces_its_own_limits() {
+    let no_footer = assert_accepted(ProductMessage::new("catalog-1", "sku-1"));
+    assert_eq!(no_footer["interactive"].get("footer"), None);
+
+    for catalog_id in [
+        "c".to_string(),
+        "c".repeat(CATALOG_ID_MAX_CHARS - 1),
+        "c".repeat(CATALOG_ID_MAX_CHARS),
+        "é".repeat(CATALOG_ID_MAX_CHARS),
+    ] {
+        assert_accepted(ProductMessage::new(catalog_id, "sku-1"));
+    }
+    for catalog_id in [
+        String::new(),
+        "c\n1".to_string(),
+        "c".repeat(CATALOG_ID_MAX_CHARS + 1),
+        "é".repeat(CATALOG_ID_MAX_CHARS + 1),
+    ] {
+        assert_rejected(
+            ProductMessage::new(catalog_id, "sku-1"),
+            "interactive.action.catalog_id",
+        );
+    }
+
+    for product_id in [
+        "p".to_string(),
+        "p".repeat(PRODUCT_RETAILER_ID_MAX_CHARS - 1),
+        "p".repeat(PRODUCT_RETAILER_ID_MAX_CHARS),
+        "é".repeat(PRODUCT_RETAILER_ID_MAX_CHARS),
+    ] {
+        assert_accepted(ProductMessage::new("catalog-1", product_id));
+    }
+    for product_id in [
+        String::new(),
+        "p\n1".to_string(),
+        "p".repeat(PRODUCT_RETAILER_ID_MAX_CHARS + 1),
+        "é".repeat(PRODUCT_RETAILER_ID_MAX_CHARS + 1),
+    ] {
+        assert_rejected(
+            ProductMessage::new("catalog-1", product_id),
+            "interactive.action.product_retailer_id",
+        );
+    }
+
+    for body in [
+        "b".to_string(),
+        "b".repeat(COMMERCE_BODY_MAX_BYTES - 1),
+        "b".repeat(COMMERCE_BODY_MAX_BYTES),
+        "é".repeat(COMMERCE_BODY_MAX_BYTES / 2),
+    ] {
+        assert_accepted(ProductMessage::new("catalog-1", "sku-1").body(body));
+    }
+    for body in [
+        String::new(),
+        "b".repeat(COMMERCE_BODY_MAX_BYTES + 1),
+        "é".repeat(COMMERCE_BODY_MAX_BYTES / 2 + 1),
+    ] {
+        assert_rejected(
+            ProductMessage::new("catalog-1", "sku-1").body(body),
+            "interactive.body.text",
+        );
+    }
+
+    for footer in [
+        "f".to_string(),
+        "f".repeat(COMMERCE_FOOTER_MAX_CHARS - 1),
+        "f".repeat(COMMERCE_FOOTER_MAX_CHARS),
+        "é".repeat(COMMERCE_FOOTER_MAX_CHARS),
+    ] {
+        assert_accepted(ProductMessage::new("catalog-1", "sku-1").footer(footer));
+    }
+    for footer in [
+        "f".repeat(COMMERCE_FOOTER_MAX_CHARS + 1),
+        "é".repeat(COMMERCE_FOOTER_MAX_CHARS + 1),
+    ] {
+        assert_rejected(
+            ProductMessage::new("catalog-1", "sku-1").footer(footer),
+            "interactive.footer.text",
+        );
+    }
+
+    assert!(ProductMessage::new("catalog-1", "sku-1").validate().is_ok());
+    assert_field_error(
+        ProductMessage::new("catalog-1", "").validate(),
+        "interactive.action.product_retailer_id",
+    );
+}
+
+#[test]
 fn product_sections_and_titles_stop_at_their_limits() {
     let ten_sections: Vec<_> = (0..PRODUCT_SECTIONS_MAX)
         .map(|index| section(Some("Coffee"), 3).title(format!("Section {index}")))
@@ -369,6 +545,14 @@ fn product_sections_and_titles_stop_at_their_limits() {
     let title_at = "t".repeat(PRODUCT_SECTION_TITLE_MAX_CHARS);
     let two_titled = vec![section(Some(&title_at), 1), section(Some(&title_at), 1)];
     assert_accepted(ProductListMessage::new("c", two_titled));
+    let unicode_title_at = "é".repeat(PRODUCT_SECTION_TITLE_MAX_CHARS);
+    assert_accepted(ProductListMessage::new(
+        "c",
+        vec![
+            section(Some(&unicode_title_at), 1),
+            section(Some(&unicode_title_at), 1),
+        ],
+    ));
     let one_too_long = vec![
         section(Some(&"t".repeat(PRODUCT_SECTION_TITLE_MAX_CHARS + 1)), 1),
         section(Some("Coffee"), 1),
@@ -406,6 +590,81 @@ fn product_count_stops_at_30_in_total() {
 }
 
 #[test]
+fn product_items_validate_their_own_id_boundary() {
+    let product_field = "interactive.action.sections.product_items.product_retailer_id";
+    assert!(
+        ProductItem::new("p".repeat(PRODUCT_RETAILER_ID_MAX_CHARS - 1))
+            .validate()
+            .is_ok()
+    );
+    assert!(ProductItem::new("p".repeat(PRODUCT_RETAILER_ID_MAX_CHARS))
+        .validate()
+        .is_ok());
+    assert_field_error(
+        ProductItem::new("p".repeat(PRODUCT_RETAILER_ID_MAX_CHARS + 1)).validate(),
+        product_field,
+    );
+    assert_field_error(ProductItem::new("").validate(), product_field);
+    assert_field_error(ProductItem::new("sku\n1").validate(), product_field);
+    assert!(ProductItem::new("é".repeat(PRODUCT_RETAILER_ID_MAX_CHARS))
+        .validate()
+        .is_ok());
+    assert_field_error(
+        ProductItem::new("é".repeat(PRODUCT_RETAILER_ID_MAX_CHARS + 1)).validate(),
+        product_field,
+    );
+}
+
+#[test]
+fn catalog_product_ids_reject_empty_and_control_values() {
+    let thumbnail_field = "interactive.action.parameters.thumbnail_product_retailer_id";
+    let catalog_field = "interactive.action.catalog_id";
+    let product_field = "interactive.action.product_retailer_id";
+
+    assert_rejected(CatalogMessage::new(""), thumbnail_field);
+    assert_rejected(CatalogMessage::new("sku\n1"), thumbnail_field);
+    assert_rejected(ProductMessage::new("", "p"), catalog_field);
+    assert_rejected(ProductMessage::new("c\n1", "p"), catalog_field);
+    assert_rejected(ProductMessage::new("c", ""), product_field);
+    assert_rejected(ProductMessage::new("c", "p\n1"), product_field);
+
+    let mut list = one_section();
+    list.catalog_id = String::new();
+    assert_rejected(list, catalog_field);
+    let mut list = one_section();
+    list.catalog_id = "c\n1".into();
+    assert_rejected(list, catalog_field);
+}
+
+#[test]
+fn product_sections_validate_their_own_title_and_product_boundaries() {
+    let title_field = "interactive.action.sections.title";
+    let product_field = "interactive.action.sections.product_items";
+
+    for title in [
+        "t".repeat(PRODUCT_SECTION_TITLE_MAX_CHARS - 1),
+        "t".repeat(PRODUCT_SECTION_TITLE_MAX_CHARS),
+    ] {
+        assert!(section(Some(&title), 1).validate().is_ok());
+    }
+    assert_field_error(
+        section(Some(&"t".repeat(PRODUCT_SECTION_TITLE_MAX_CHARS + 1)), 1).validate(),
+        title_field,
+    );
+    assert_field_error(section(Some(""), 1).validate(), title_field);
+    assert_field_error(section(None, 0).validate(), product_field);
+
+    for products in [PRODUCTS_MAX - 1, PRODUCTS_MAX] {
+        assert!(section(None, products).validate().is_ok());
+    }
+    assert_field_error(section(None, PRODUCTS_MAX + 1).validate(), product_field);
+    assert_field_error(
+        ProductSection::new(vec![ProductItem::new("")]).validate(),
+        "interactive.action.sections.product_items.product_retailer_id",
+    );
+}
+
+#[test]
 fn product_list_requires_a_header() {
     let mut message = one_section();
     message.header = None;
@@ -417,6 +676,10 @@ fn commerce_bodies_headers_and_footers_stop_at_their_limits() {
     let body_at = "b".repeat(COMMERCE_BODY_MAX_BYTES);
     assert_accepted(CatalogMessage::new("p").body(body_at));
     assert_accepted(CatalogMessage::new("p").body("é".repeat(COMMERCE_BODY_MAX_BYTES / 2)));
+    assert_rejected(
+        CatalogMessage::new("p").body("é".repeat(COMMERCE_BODY_MAX_BYTES / 2 + 1)),
+        "interactive.body.text",
+    );
     assert_rejected(
         CatalogMessage::new("p").body("b".repeat(COMMERCE_BODY_MAX_BYTES + 1)),
         "interactive.body.text",
@@ -430,6 +693,11 @@ fn commerce_bodies_headers_and_footers_stop_at_their_limits() {
             .header(HeaderText::new(&header_at))
             .footer(&footer_at),
     );
+    assert_accepted(
+        one_section()
+            .header(HeaderText::new("é".repeat(COMMERCE_FOOTER_MAX_CHARS)))
+            .footer("é".repeat(COMMERCE_FOOTER_MAX_CHARS)),
+    );
     assert_rejected(
         one_section().header(HeaderText::new("h".repeat(COMMERCE_FOOTER_MAX_CHARS + 1))),
         "interactive.header.text",
@@ -441,45 +709,161 @@ fn commerce_bodies_headers_and_footers_stop_at_their_limits() {
 }
 
 #[test]
-fn order_item_count_text_and_reference_id_stop_at_their_limits() {
-    let items: Vec<_> = (0..ORDER_ITEMS_MAX)
-        .map(|index| OrderItem::new(format!("sku-{index}"), 1, 1.0, "EUR"))
-        .collect();
-    assert_accepted(OrderDetailsMessage::new(
-        "r",
-        Order::new("c", items.clone()),
-    ));
-    let too_many: Vec<_> = (0..=ORDER_ITEMS_MAX)
-        .map(|index| OrderItem::new(format!("sku-{index}"), 1, 1.0, "EUR"))
-        .collect();
-    assert_rejected(
-        OrderDetailsMessage::new("r", Order::new("c", too_many)),
-        "interactive.action.parameters.order.product_items",
-    );
-    assert_rejected(
-        OrderDetailsMessage::new("r", Order::new("c", Vec::new())),
-        "interactive.action.parameters.order.product_items",
-    );
+fn order_catalog_and_item_ids_stop_at_100_characters() {
+    let catalog_field = "interactive.action.parameters.order.catalog_id";
+    let item_field = "interactive.action.parameters.order.product_items.product_retailer_id";
+    let item = || OrderItem::new("p", 1, 1.0, "EUR");
 
-    let text_at = "t".repeat(ORDER_TEXT_MAX_BYTES);
-    assert_accepted(OrderDetailsMessage::new(
-        "r",
-        Order::new("c", items.clone()).text(text_at),
-    ));
-    assert_rejected(
-        OrderDetailsMessage::new(
+    for catalog_id in [
+        "c".repeat(CATALOG_ID_MAX_CHARS - 1),
+        "c".repeat(CATALOG_ID_MAX_CHARS),
+        "é".repeat(CATALOG_ID_MAX_CHARS),
+    ] {
+        assert!(Order::new(catalog_id, vec![item()]).validate().is_ok());
+    }
+    for catalog_id in [
+        String::new(),
+        "c\n".to_string(),
+        "c".repeat(CATALOG_ID_MAX_CHARS + 1),
+        "é".repeat(CATALOG_ID_MAX_CHARS + 1),
+    ] {
+        assert_field_error(
+            Order::new(catalog_id, vec![item()]).validate(),
+            catalog_field,
+        );
+    }
+
+    for product_id in [
+        "p".repeat(PRODUCT_RETAILER_ID_MAX_CHARS - 1),
+        "p".repeat(PRODUCT_RETAILER_ID_MAX_CHARS),
+        "é".repeat(PRODUCT_RETAILER_ID_MAX_CHARS),
+    ] {
+        assert!(
+            Order::new("c", vec![OrderItem::new(product_id, 1, 1.0, "EUR")])
+                .validate()
+                .is_ok()
+        );
+    }
+    for product_id in [
+        String::new(),
+        "p\n".to_string(),
+        "p".repeat(PRODUCT_RETAILER_ID_MAX_CHARS + 1),
+        "é".repeat(PRODUCT_RETAILER_ID_MAX_CHARS + 1),
+    ] {
+        assert_field_error(
+            Order::new("c", vec![OrderItem::new(product_id, 1, 1.0, "EUR")]).validate(),
+            item_field,
+        );
+    }
+}
+
+#[test]
+fn order_item_count_and_text_stop_at_their_limits() {
+    let items = |count| {
+        (0..count)
+            .map(|index| OrderItem::new(format!("sku-{index}"), 1, 1.0, "EUR"))
+            .collect::<Vec<_>>()
+    };
+
+    for count in [1, ORDER_ITEMS_MAX - 1, ORDER_ITEMS_MAX] {
+        assert_accepted(OrderDetailsMessage::new("r", Order::new("c", items(count))));
+    }
+    for count in [0, ORDER_ITEMS_MAX + 1] {
+        assert_rejected(
+            OrderDetailsMessage::new("r", Order::new("c", items(count))),
+            "interactive.action.parameters.order.product_items",
+        );
+    }
+
+    for text in [
+        String::new(),
+        "t".repeat(ORDER_TEXT_MAX_BYTES - 1),
+        "t".repeat(ORDER_TEXT_MAX_BYTES),
+        "é".repeat(ORDER_TEXT_MAX_BYTES / 2 - 1),
+        "é".repeat(ORDER_TEXT_MAX_BYTES / 2),
+    ] {
+        assert_accepted(OrderDetailsMessage::new(
             "r",
-            Order::new("c", items).text("t".repeat(ORDER_TEXT_MAX_BYTES + 1)),
-        ),
-        "interactive.action.parameters.order.text",
-    );
+            Order::new("c", items(1)).text(text),
+        ));
+    }
+    for text in [
+        "t".repeat(ORDER_TEXT_MAX_BYTES + 1),
+        "é".repeat(ORDER_TEXT_MAX_BYTES / 2 + 1),
+    ] {
+        assert_rejected(
+            OrderDetailsMessage::new("r", Order::new("c", items(1)).text(text)),
+            "interactive.action.parameters.order.text",
+        );
+    }
+}
 
-    let reference_at = "r".repeat(ORDER_REFERENCE_ID_MAX_CHARS);
-    assert_accepted(OrderDetailsMessage::new(reference_at, order()));
-    assert_rejected(
-        OrderDetailsMessage::new("r".repeat(ORDER_REFERENCE_ID_MAX_CHARS + 1), order()),
-        "interactive.action.parameters.reference_id",
-    );
+#[test]
+fn order_reference_ids_are_measured_in_characters() {
+    for reference_id in [
+        "r".to_string(),
+        "r".repeat(ORDER_REFERENCE_ID_MAX_CHARS - 1),
+        "r".repeat(ORDER_REFERENCE_ID_MAX_CHARS),
+        "é".repeat(ORDER_REFERENCE_ID_MAX_CHARS),
+    ] {
+        assert_accepted(OrderDetailsMessage::new(reference_id.clone(), order()));
+        assert_accepted(OrderStatusMessage::new(reference_id, OrderStatus::Shipped));
+    }
+    for reference_id in [
+        String::new(),
+        "r\n".to_string(),
+        "r".repeat(ORDER_REFERENCE_ID_MAX_CHARS + 1),
+        "é".repeat(ORDER_REFERENCE_ID_MAX_CHARS + 1),
+    ] {
+        assert_rejected(
+            OrderDetailsMessage::new(reference_id.clone(), order()),
+            "interactive.action.parameters.reference_id",
+        );
+        assert_rejected(
+            OrderStatusMessage::new(reference_id, OrderStatus::Shipped),
+            "interactive.action.parameters.reference_id",
+        );
+    }
+}
+
+#[test]
+fn order_details_body_and_footer_stop_at_their_limits() {
+    for body in [
+        "b".to_string(),
+        "b".repeat(COMMERCE_BODY_MAX_BYTES - 1),
+        "b".repeat(COMMERCE_BODY_MAX_BYTES),
+        "é".repeat(COMMERCE_BODY_MAX_BYTES / 2),
+    ] {
+        assert_accepted(OrderDetailsMessage::new("r", order()).body(body));
+    }
+    for body in [
+        String::new(),
+        "b".repeat(COMMERCE_BODY_MAX_BYTES + 1),
+        "é".repeat(COMMERCE_BODY_MAX_BYTES / 2 + 1),
+    ] {
+        assert_rejected(
+            OrderDetailsMessage::new("r", order()).body(body),
+            "interactive.body.text",
+        );
+    }
+
+    for footer in [
+        String::new(),
+        "f".repeat(COMMERCE_FOOTER_MAX_CHARS - 1),
+        "f".repeat(COMMERCE_FOOTER_MAX_CHARS),
+        "é".repeat(COMMERCE_FOOTER_MAX_CHARS),
+    ] {
+        assert_accepted(OrderDetailsMessage::new("r", order()).footer(footer));
+    }
+    for footer in [
+        "f".repeat(COMMERCE_FOOTER_MAX_CHARS + 1),
+        "é".repeat(COMMERCE_FOOTER_MAX_CHARS + 1),
+    ] {
+        assert_rejected(
+            OrderDetailsMessage::new("r", order()).footer(footer),
+            "interactive.footer.text",
+        );
+    }
 }
 
 #[test]
@@ -554,28 +938,49 @@ fn every_commerce_limit_accepts_the_value_just_inside() {
 
 #[test]
 fn order_quantity_price_and_currency_boundaries_are_enforced() {
-    assert_accepted(OrderDetailsMessage::new(
-        "r",
-        Order::new("c", vec![OrderItem::new("p", 1, 0.0, "EUR")]),
-    ));
-    for item in [
-        OrderItem::new("p", 0, 1.0, "EUR"),
-        OrderItem::new("p", 1, -0.01, "EUR"),
-        OrderItem::new("p", 1, f64::NAN, "EUR"),
-        OrderItem::new("p", 1, f64::INFINITY, "EUR"),
+    for quantity in [1, u32::MAX - 1, u32::MAX] {
+        assert_accepted(OrderDetailsMessage::new(
+            "r",
+            Order::new("c", vec![OrderItem::new("p", quantity, 1.0, "EUR")]),
+        ));
+    }
+    assert_rejected(
+        OrderDetailsMessage::new(
+            "r",
+            Order::new("c", vec![OrderItem::new("p", 0, 1.0, "EUR")]),
+        ),
+        "interactive.action.parameters.order.product_items.quantity",
+    );
+
+    for item_price in [0.0, f64::MIN_POSITIVE, f64::MAX] {
+        assert_accepted(OrderDetailsMessage::new(
+            "r",
+            Order::new("c", vec![OrderItem::new("p", 1, item_price, "EUR")]),
+        ));
+    }
+    for item_price in [
+        -f64::MIN_POSITIVE,
+        -0.01,
+        f64::NAN,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
     ] {
-        let expected = if item.quantity == 0 {
-            "interactive.action.parameters.order.product_items.quantity"
-        } else {
-            "interactive.action.parameters.order.product_items.item_price"
-        };
         assert_rejected(
-            OrderDetailsMessage::new("r", Order::new("c", vec![item])),
-            expected,
+            OrderDetailsMessage::new(
+                "r",
+                Order::new("c", vec![OrderItem::new("p", 1, item_price, "EUR")]),
+            ),
+            "interactive.action.parameters.order.product_items.item_price",
         );
     }
 
-    for currency in ["EU", "EURO", "eur", "E1R"] {
+    for currency in ["EUR", "USD", "JPY"] {
+        assert_accepted(OrderDetailsMessage::new(
+            "r",
+            Order::new("c", vec![OrderItem::new("p", 1, 1.0, currency)]),
+        ));
+    }
+    for currency in ["", "EU", "EURO", "eur", "E1R", "ÉUR"] {
         assert_rejected(
             OrderDetailsMessage::new(
                 "r",
@@ -584,14 +989,6 @@ fn order_quantity_price_and_currency_boundaries_are_enforced() {
             "interactive.action.parameters.order.product_items.currency",
         );
     }
-
-    assert_rejected(
-        OrderDetailsMessage::new(
-            "r",
-            Order::new("c", vec![OrderItem::new("", 1, 1.0, "EUR")]),
-        ),
-        "interactive.action.parameters.order.product_items.product_retailer_id",
-    );
 }
 
 #[test]
@@ -654,16 +1051,52 @@ fn malformed_inbound_order_numbers_are_typed_errors() {
 }
 
 #[test]
-fn order_status_description_stops_at_1024_bytes() {
-    let at = "d".repeat(ORDER_DESCRIPTION_MAX_BYTES);
-    assert_accepted(OrderStatusMessage::new("r", OrderStatus::Shipped).description(at));
-    assert_rejected(
-        OrderStatusMessage::new("r", OrderStatus::Shipped)
-            .description("d".repeat(ORDER_DESCRIPTION_MAX_BYTES + 1)),
-        "interactive.action.parameters.order.description",
-    );
+fn order_status_body_and_description_stop_at_1024_bytes() {
+    for description in [
+        String::new(),
+        "d".repeat(ORDER_DESCRIPTION_MAX_BYTES - 1),
+        "d".repeat(ORDER_DESCRIPTION_MAX_BYTES),
+        "é".repeat(ORDER_DESCRIPTION_MAX_BYTES / 2),
+    ] {
+        assert_accepted(
+            OrderStatusMessage::new("r", OrderStatus::Shipped).description(description),
+        );
+    }
+    for description in [
+        "d".repeat(ORDER_DESCRIPTION_MAX_BYTES + 1),
+        "é".repeat(ORDER_DESCRIPTION_MAX_BYTES / 2 + 1),
+    ] {
+        assert_rejected(
+            OrderStatusMessage::new("r", OrderStatus::Shipped).description(description),
+            "interactive.action.parameters.order.description",
+        );
+    }
+
+    for body in [
+        "b".to_string(),
+        "b".repeat(COMMERCE_BODY_MAX_BYTES - 1),
+        "b".repeat(COMMERCE_BODY_MAX_BYTES),
+        "é".repeat(COMMERCE_BODY_MAX_BYTES / 2),
+    ] {
+        assert_accepted(OrderStatusMessage::new("r", OrderStatus::Shipped).body(body));
+    }
+    for body in [
+        String::new(),
+        "b".repeat(COMMERCE_BODY_MAX_BYTES + 1),
+        "é".repeat(COMMERCE_BODY_MAX_BYTES / 2 + 1),
+    ] {
+        assert_rejected(
+            OrderStatusMessage::new("r", OrderStatus::Shipped).body(body),
+            "interactive.body.text",
+        );
+    }
+
     assert_rejected(
         OrderStatusMessage::new("r", OrderStatus::Unknown(String::new())),
+        "interactive.action.parameters.order.status",
+    );
+    assert_rejected(
+        OrderStatusMessage::new("r", OrderStatus::Unknown("ship\nped".into())),
         "interactive.action.parameters.order.status",
     );
 }

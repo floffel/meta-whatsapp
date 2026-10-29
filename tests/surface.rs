@@ -24,8 +24,9 @@ use meta_whatsapp::{
     AudioMessage, ButtonMessage, ContactCard, ContactName, ContactOrg, ContactsMessage,
     DocumentMessage, EmailType, Error, FlowAction, FlowMessage, FlowMode, HeaderText, ImageMessage,
     InteractiveMessage, ListMessage, ListRow, ListSection, LocationMessage,
-    MediaBytes as ReexportedMediaBytes, MessageBody, PhoneType, ReactionMessage, RecipientType,
-    ReplyButton, StickerMessage, TemplateMessage, TextMessage, UrlType, VideoMessage,
+    MediaBytes as ReexportedMediaBytes, MessageBody, PhoneType, ProductItem, ProductListMessage,
+    ProductMessage, ReactionMessage, RecipientType, ReplyButton, StickerMessage, TemplateMessage,
+    TextMessage, UrlType, VideoMessage,
 };
 
 #[test]
@@ -55,11 +56,46 @@ fn every_body_reports_its_wire_type() {
                 .into(),
             "interactive",
         ),
+        (
+            meta_whatsapp::CatalogMessage::new("p").into(),
+            "interactive",
+        ),
+        (ProductMessage::new("c", "p").into(), "interactive"),
+        (
+            ProductListMessage::new(
+                "c",
+                vec![meta_whatsapp::ProductSection::new(vec![ProductItem::new(
+                    "p",
+                )])],
+            )
+            .into(),
+            "interactive",
+        ),
         (TemplateMessage::new("t", "de").into(), "template"),
     ];
     for (body, expected) in cases {
         assert_eq!(body.message_type(), expected);
         assert!(body.validate().is_ok(), "{expected} must validate");
+    }
+}
+
+#[test]
+fn catalog_variants_report_their_interactive_kind() {
+    let catalog: InteractiveMessage = meta_whatsapp::CatalogMessage::new("p").into();
+    let product: InteractiveMessage = ProductMessage::new("c", "p").into();
+    let list: InteractiveMessage = ProductListMessage::new(
+        "c",
+        vec![meta_whatsapp::ProductSection::new(vec![ProductItem::new(
+            "p",
+        )])],
+    )
+    .into();
+
+    assert_eq!(catalog.kind(), "catalog_message");
+    assert_eq!(product.kind(), "product");
+    assert_eq!(list.kind(), "product_list");
+    for message in [catalog, product, list] {
+        assert!(message.validate().is_ok());
     }
 }
 

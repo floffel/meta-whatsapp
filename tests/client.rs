@@ -93,7 +93,7 @@ async fn retry_after_is_honoured_on_429() {
     let transport = MockTransport::new();
     transport.push_response(response(
         429,
-        &[("Retry-After", "1")],
+        &[("Retry-After", "0")],
         b"{\"error\":{\"code\":4,\"message\":\"rate limited\"}}",
     ));
     transport.push_response(accepted("wamid.1"));
@@ -320,9 +320,13 @@ fn retry_defaults_are_bounded() {
     assert_eq!(policy.delay(1, None), Some(Duration::from_millis(250)));
     assert_eq!(policy.delay(2, None), Some(Duration::from_millis(500)));
     assert_eq!(policy.delay(3, None), None);
-    // Retry-After is clamped to the ceiling.
+    // Retry-After is honoured exactly at the ceiling and surfaced above it.
     assert_eq!(
-        policy.delay(1, Some(Duration::from_secs(600))),
-        Some(Duration::from_secs(8))
+        policy.delay(1, Some(policy.max_delay)),
+        Some(policy.max_delay)
+    );
+    assert_eq!(
+        policy.delay(1, Some(policy.max_delay + Duration::from_nanos(1))),
+        None
     );
 }

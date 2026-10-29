@@ -164,6 +164,34 @@ proptest! {
         }
     }
 
+    /// A `Retry-After` within the ceiling is honoured exactly; one above it is
+    /// surfaced rather than shortened into an early retry. A spent budget still
+    /// wins in both cases.
+    #[test]
+    fn retry_after_is_honoured_only_within_the_ceiling(
+        hint_ms in 0_u64..10_000,
+        max_ms in 0_u64..5_000,
+        attempts_failed in 0_u32..12,
+        max_attempts in 1_u32..12,
+    ) {
+        let policy = RetryPolicy::new(max_attempts)
+            .with_max_delay(Duration::from_millis(max_ms));
+        let hint = Duration::from_millis(hint_ms);
+        let action = policy.decide(
+            Attempt::RateLimited {
+                retry_after: Some(hint),
+            },
+            Repeatability::NotIdempotent,
+            attempts_failed,
+        );
+        let expected = if attempts_failed < max_attempts && hint <= policy.max_delay {
+            Action::Retry(hint)
+        } else {
+            Action::Surface
+        };
+        prop_assert_eq!(action, expected);
+    }
+
     /// The delivery contract, pinned: whatever the status, whatever the budget,
     /// a non-idempotent request is **never** retried after a 5xx.
     #[test]

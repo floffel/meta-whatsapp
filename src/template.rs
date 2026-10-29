@@ -2,10 +2,7 @@
 //!
 //! Templates are pre-approved by Meta. Sending one references its name and
 //! language plus the positional parameters for the header, body and buttons;
-//! listing them reads `/{waba_id}/message_templates` with cursor paging, and
-//! [`crate::WhatsAppClient::create_template`],
-//! [`crate::WhatsAppClient::update_template`] and
-//! [`crate::WhatsAppClient::delete_template`] manage the definitions.
+//! listing them reads `/{waba_id}/message_templates` with cursor paging.
 //!
 //! ```
 //! use meta_whatsapp::{MessageRequest, TemplateMessage};
@@ -31,9 +28,7 @@ use serde_json::{json, Map, Value};
 
 use crate::error::{Error, Result};
 use crate::media::MediaRef;
-use crate::message::{
-    require_max_bytes, require_max_chars, require_no_controls, require_non_empty,
-};
+use crate::message::require_max_bytes;
 
 /// Maximum UTF-8 byte length of a template name.
 ///
@@ -155,6 +150,50 @@ pub const TEMPLATE_COMPONENTS_MAX: usize = 4;
 /// ```
 pub const TEMPLATE_ID_MAX_DIGITS: usize = 32;
 
+/// Maximum authentication-code lifetime Meta accepts in a template footer.
+///
+/// ```
+/// use meta_whatsapp::template::TEMPLATE_CODE_EXPIRATION_MINUTES_MAX;
+/// assert_eq!(TEMPLATE_CODE_EXPIRATION_MINUTES_MAX, 90);
+/// ```
+pub const TEMPLATE_CODE_EXPIRATION_MINUTES_MAX: u16 = 90;
+
+/// Category assigned to a template definition.
+///
+/// ```
+/// use meta_whatsapp::TemplateCategory;
+///
+/// assert_eq!(TemplateCategory::Utility.as_str(), "UTILITY");
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
+pub enum TemplateCategory {
+    /// Promotional content.
+    #[default]
+    Marketing,
+    /// Transactional content.
+    Utility,
+    /// One-time authentication codes.
+    Authentication,
+}
+
+impl TemplateCategory {
+    /// Upper-case wire representation.
+    ///
+    /// ```
+    /// use meta_whatsapp::TemplateCategory;
+    /// assert_eq!(TemplateCategory::Authentication.as_str(), "AUTHENTICATION");
+    /// ```
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Marketing => "MARKETING",
+            Self::Utility => "UTILITY",
+            Self::Authentication => "AUTHENTICATION",
+        }
+    }
+}
+
 /// Language block of a template: `code` plus optional `policy`.
 ///
 /// ```
@@ -210,9 +249,7 @@ impl TemplateLanguage {
         if count > TEMPLATE_LANGUAGE_MAX_CHARS {
             return Err(Error::validation(
                 "template.language.code",
-                format!(
-                    "must be at most {TEMPLATE_LANGUAGE_MAX_CHARS} characters, got {count}"
-                ),
+                format!("must be at most {TEMPLATE_LANGUAGE_MAX_CHARS} characters, got {count}"),
             ));
         }
         if !self
@@ -1047,17 +1084,14 @@ impl TemplateQuery {
             ("language", &self.language),
         ] {
             if let Some(value) = value {
-                parts.push(format!(
-                    "{key}={}",
-                    utf8_percent_encode(value, QUERY_VALUE_SET)
-                ));
+                parts.push(format!("{key}={}", encode_query_value(value)));
             }
         }
         if !self.fields.is_empty() {
             let fields = self
                 .fields
                 .iter()
-                .map(|field| utf8_percent_encode(field, QUERY_VALUE_SET).to_string())
+                .map(|field| encode_query_value(field))
                 .collect::<Vec<_>>()
                 .join("%2C");
             parts.push(format!("fields={fields}"));
@@ -1192,14 +1226,8 @@ const QUERY_VALUE_SET: &AsciiSet = &NON_ALPHANUMERIC
     .remove(b'_')
     .remove(b'~');
 
-fn require_max_bytes(field: &'static str, value: &str, max: usize) -> Result<()> {
-    if value.len() > max {
-        return Err(Error::validation(
-            field,
-            format!("must be at most {max} bytes, got {}", value.len()),
-        ));
-    }
-    Ok(())
+pub(crate) fn encode_query_value(value: &str) -> String {
+    utf8_percent_encode(value, QUERY_VALUE_SET).to_string()
 }
 
 #[cfg(test)]

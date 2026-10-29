@@ -312,7 +312,7 @@ pub enum MessageBody {
     Contacts(ContactsMessage),
     /// Emoji reaction to an inbound message.
     Reaction(ReactionMessage),
-    /// Buttons, list or flow.
+    /// Buttons, list, flow, or a commerce payload.
     Interactive(InteractiveMessage),
     /// Pre-approved template.
     Template(TemplateMessage),

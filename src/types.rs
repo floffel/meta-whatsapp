@@ -422,7 +422,7 @@ impl Message {
         self.timestamp.trim().parse().ok()
     }
 
-    /// The inbound order, if this message is an order.
+    /// The inbound order, if this message has `type == "order"`.
     ///
     /// ```
     /// use meta_whatsapp::Message;
@@ -436,10 +436,19 @@ impl Message {
     /// let order = message.order().unwrap();
     /// assert_eq!(order.product_items[0].quantity, 2);
     /// assert_eq!(order.product_items[0].item_price, 4.5);
+    ///
+    /// let not_an_order: Message = serde_json::from_str(
+    ///     r#"{"id":"1","from":"2","type":"text","order":{"catalog_id":"c"}}"#,
+    /// ).unwrap();
+    /// assert!(not_an_order.order().is_none());
     /// ```
     #[must_use]
     pub fn order(&self) -> Option<&Order> {
-        self.order.as_ref()
+        if self.message_type == "order" {
+            self.order.as_ref()
+        } else {
+            None
+        }
     }
 
     /// The address reply, whether Meta placed it under

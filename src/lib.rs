@@ -123,12 +123,13 @@ pub use subscription::{
     SubscribedApp, SubscriptionConfig, SubscriptionState, WebhookSubscriptions,
 };
 pub use template::{
-    Cursors, Paging, TemplateButtonType, TemplateComponent, TemplateLanguage, TemplateList,
-    TemplateMediaKind, TemplateMessage, TemplateParameter, TemplateQuery, TemplateSummary,
+    Cursors, Paging, TemplateButtonType, TemplateCategory, TemplateComponent, TemplateLanguage,
+    TemplateList, TemplateMediaKind, TemplateMessage, TemplateParameter, TemplateQuery,
+    TemplateSummary,
 };
+pub use transport::Transport;
 #[cfg(feature = "http")]
 pub use transport::{ReqwestTransport, DEFAULT_MAX_RESPONSE_BYTES};
-pub use transport::Transport;
 pub use types::{Change, ChangeValue, Entry, Message, Status, WebhookPayload};
 pub use usage::{BusinessUseCaseUsage, UseCaseUsage};
 pub use webhook::WebhookVerifier;

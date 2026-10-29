@@ -391,6 +391,11 @@ impl Error {
 
     /// The server requested wait, when it sent a `Retry-After` header.
     ///
+    /// This is the parsed header value unchanged. With `use_retry_after`
+    /// enabled (the default), a value above [`crate::RetryPolicy::max_delay`]
+    /// causes the client to surface the error instead of retrying early, so the
+    /// caller still sees the full hint.
+    ///
     /// ```rust
     /// use meta_whatsapp::Error;
     /// let err = Error::Api {

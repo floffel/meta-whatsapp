@@ -186,7 +186,8 @@ pub struct CatalogMessage {
     pub body: String,
     /// Optional footer, at most 60 characters.
     pub footer: Option<String>,
-    /// Retailer id of the product shown as the catalog thumbnail.
+    /// Retailer id of the product shown as the catalog thumbnail, at most 100
+    /// characters.
     pub thumbnail_product_retailer_id: String,
 }
 
@@ -292,9 +293,9 @@ pub struct ProductMessage {
     pub body: String,
     /// Optional footer, at most 60 characters.
     pub footer: Option<String>,
-    /// Catalog that owns the product.
+    /// Catalog that owns the product, at most 100 characters.
     pub catalog_id: String,
-    /// Product shown in the message.
+    /// Product shown in the message, at most 100 characters.
     pub product_retailer_id: String,
 }
 
@@ -351,7 +352,7 @@ impl ProductMessage {
     ///
     /// [`Error::Validation`] for an empty or oversized field.
     pub fn validate(&self) -> Result<()> {
-        validate_catalog_id(&self.catalog_id)?;
+        validate_catalog_id("interactive.action.catalog_id", &self.catalog_id)?;
         validate_product_id(
             "interactive.action.product_retailer_id",
             &self.product_retailer_id,
@@ -386,7 +387,7 @@ impl ProductMessage {
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProductItem {
-    /// Retailer id of the product.
+    /// Retailer id of the product, at most 100 characters.
     pub product_retailer_id: String,
 }
 
@@ -403,7 +404,20 @@ impl ProductItem {
         }
     }
 
-    fn validate(&self) -> Result<()> {
+    /// Checks the product retailer id.
+    ///
+    /// ```
+    /// use meta_whatsapp::ProductItem;
+    ///
+    /// assert!(ProductItem::new("sku-1").validate().is_ok());
+    /// assert!(ProductItem::new("").validate().is_err());
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an empty, oversized, or control-containing
+    /// retailer id.
+    pub fn validate(&self) -> Result<()> {
         validate_product_id(
             "interactive.action.sections.product_items.product_retailer_id",
             &self.product_retailer_id,
@@ -428,7 +442,7 @@ pub struct ProductSection {
     /// Optional section title, at most 24 characters. Required when the
     /// message has more than one section.
     pub title: Option<String>,
-    /// Products in this section, at most 30.
+    /// Products in this section. A message may contain at most 30 in total.
     pub product_items: Vec<ProductItem>,
 }
 
@@ -462,7 +476,29 @@ impl ProductSection {
         self
     }
 
-    fn validate(&self, title_required: bool) -> Result<()> {
+    /// Checks the section title, product count and every product id.
+    ///
+    /// A [`ProductSection`] used in a message with more than one section must
+    /// also have a title; [`ProductListMessage::validate`] enforces that
+    /// context-dependent rule.
+    ///
+    /// ```
+    /// use meta_whatsapp::{ProductItem, ProductSection};
+    ///
+    /// let section = ProductSection::new(vec![ProductItem::new("sku-1")]);
+    /// assert!(section.validate().is_ok());
+    /// assert!(ProductSection::new(Vec::new()).validate().is_err());
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an empty or oversized title, no products, too
+    /// many products, or an invalid product id.
+    pub fn validate(&self) -> Result<()> {
+        self.validate_with(false)
+    }
+
+    fn validate_with(&self, title_required: bool) -> Result<()> {
         match &self.title {
             Some(title) => {
                 require_non_empty("interactive.action.sections.title", title)?;
@@ -484,6 +520,15 @@ impl ProductSection {
             return Err(Error::validation(
                 "interactive.action.sections.product_items",
                 "a section needs at least one product",
+            ));
+        }
+        if self.product_items.len() > PRODUCTS_MAX {
+            return Err(Error::validation(
+                "interactive.action.sections.product_items",
+                format!(
+                    "must contain at most {PRODUCTS_MAX} products in this section, got {}",
+                    self.product_items.len()
+                ),
             ));
         }
         for item in &self.product_items {
@@ -530,7 +575,7 @@ pub struct ProductListMessage {
     pub body: String,
     /// Optional footer, at most 60 characters.
     pub footer: Option<String>,
-    /// Catalog that owns every product in the message.
+    /// Catalog that owns every product in the message, at most 100 characters.
     pub catalog_id: String,
     /// One to ten product sections.
     pub sections: Vec<ProductSection>,
@@ -627,7 +672,7 @@ impl ProductListMessage {
     /// sections/products, a missing title on a multi-section message, or an
     /// oversized id/text.
     pub fn validate(&self) -> Result<()> {
-        validate_catalog_id(&self.catalog_id)?;
+        validate_catalog_id("interactive.action.catalog_id", &self.catalog_id)?;
         let Some(header) = &self.header else {
             return Err(Error::validation(
                 "interactive.header.text",
@@ -665,7 +710,7 @@ impl ProductListMessage {
         }
         let title_required = self.sections.len() > 1;
         for section in &self.sections {
-            section.validate(title_required)?;
+            section.validate_with(title_required)?;
         }
         Ok(())
     }
@@ -700,10 +745,10 @@ fn validate_product_id(field: &'static str, value: &str) -> Result<()> {
     require_no_controls(field, value)
 }
 
-fn validate_catalog_id(value: &str) -> Result<()> {
-    require_non_empty("interactive.action.catalog_id", value)?;
-    require_max_chars("interactive.action.catalog_id", value, CATALOG_ID_MAX_CHARS)?;
-    require_no_controls("interactive.action.catalog_id", value)
+fn validate_catalog_id(field: &'static str, value: &str) -> Result<()> {
+    require_non_empty(field, value)?;
+    require_max_chars(field, value, CATALOG_ID_MAX_CHARS)?;
+    require_no_controls(field, value)
 }
 
 fn validate_body(field: &'static str, value: &str) -> Result<()> {
@@ -899,7 +944,10 @@ impl Order {
     /// [`Error::Validation`] for an empty order, too many items, or an invalid
     /// line item.
     pub fn validate(&self) -> Result<()> {
-        validate_catalog_id(&self.catalog_id)?;
+        validate_catalog_id(
+            "interactive.action.parameters.order.catalog_id",
+            &self.catalog_id,
+        )?;
         if let Some(text) = &self.text {
             require_max_bytes(
                 "interactive.action.parameters.order.text",
