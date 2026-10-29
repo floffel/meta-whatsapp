@@ -1,5 +1,5 @@
 //! Typed outbound messages: text, media, location, contacts, reactions,
-//! interactive (buttons/list/flow) and templates.
+//! interactive (buttons/list/flow/address) and templates.
 //!
 //! Every family is a plain struct with a constructor and chainable setters.
 //! [`MessageRequest::to_json`] validates before it renders, so a malformed
@@ -26,6 +26,7 @@
 
 use serde_json::{json, Map, Value};
 
+use crate::address::AddressMessage;
 use crate::error::{Error, Result};
 use crate::media::MediaRef;
 use crate::template::TemplateMessage;
@@ -1616,6 +1617,12 @@ impl From<FlowMessage> for MessageBody {
     }
 }
 
+impl From<AddressMessage> for MessageBody {
+    fn from(value: AddressMessage) -> Self {
+        Self::Interactive(InteractiveMessage::Address(value))
+    }
+}
+
 /// A text header on an interactive message.
 ///
 /// ```
@@ -1639,7 +1646,7 @@ impl HeaderText {
         Self { text: text.into() }
     }
 
-    fn validate(&self) -> Result<()> {
+    pub(crate) fn validate(&self) -> Result<()> {
         require_non_empty("interactive.header.text", &self.text)?;
         require_max_chars("interactive.header.text", &self.text, HEADER_MAX_CHARS)
     }
@@ -2451,10 +2458,13 @@ pub enum InteractiveMessage {
     List(ListMessage),
     /// `WhatsApp` Flow.
     Flow(FlowMessage),
+    /// Address form (`address_message`, documented for India).
+    Address(AddressMessage),
 }
 
 impl InteractiveMessage {
-    /// Which interactive kind this is (`button`, `list`, `flow`).
+    /// Which interactive kind this is (`button`, `list`, `flow`,
+    /// `address_message`).
     ///
     /// ```
     /// use meta_whatsapp::{FlowAction, FlowMessage, InteractiveMessage};
@@ -2468,6 +2478,7 @@ impl InteractiveMessage {
             Self::Buttons(_) => "button",
             Self::List(_) => "list",
             Self::Flow(_) => "flow",
+            Self::Address(_) => "address_message",
         }
     }
 
@@ -2491,6 +2502,7 @@ impl InteractiveMessage {
             Self::Buttons(message) => message.validate(),
             Self::List(message) => message.validate(),
             Self::Flow(message) => message.validate(),
+            Self::Address(message) => message.validate(),
         }
     }
 
@@ -2499,6 +2511,7 @@ impl InteractiveMessage {
             Self::Buttons(message) => message.render(),
             Self::List(message) => message.render(),
             Self::Flow(message) => message.render(),
+            Self::Address(message) => message.render(),
         }
     }
 }
@@ -2518,6 +2531,12 @@ impl From<ListMessage> for InteractiveMessage {
 impl From<FlowMessage> for InteractiveMessage {
     fn from(value: FlowMessage) -> Self {
         Self::Flow(value)
+    }
+}
+
+impl From<AddressMessage> for InteractiveMessage {
+    fn from(value: AddressMessage) -> Self {
+        Self::Address(value)
     }
 }
 
@@ -2541,14 +2560,14 @@ fn validate_optional_caption(field: &'static str, caption: Option<&str>) -> Resu
     }
 }
 
-fn require_non_empty(field: &'static str, value: &str) -> Result<()> {
+pub(crate) fn require_non_empty(field: &'static str, value: &str) -> Result<()> {
     if value.is_empty() {
         return Err(Error::validation(field, "must not be empty"));
     }
     Ok(())
 }
 
-fn require_max_bytes(field: &'static str, value: &str, max: usize) -> Result<()> {
+pub(crate) fn require_max_bytes(field: &'static str, value: &str, max: usize) -> Result<()> {
     if value.len() > max {
         return Err(Error::validation(
             field,
@@ -2558,7 +2577,7 @@ fn require_max_bytes(field: &'static str, value: &str, max: usize) -> Result<()>
     Ok(())
 }
 
-fn require_max_chars(field: &'static str, value: &str, max: usize) -> Result<()> {
+pub(crate) fn require_max_chars(field: &'static str, value: &str, max: usize) -> Result<()> {
     let count = value.chars().count();
     if count > max {
         return Err(Error::validation(
@@ -2569,7 +2588,7 @@ fn require_max_chars(field: &'static str, value: &str, max: usize) -> Result<()>
     Ok(())
 }
 
-fn require_no_controls(field: &'static str, value: &str) -> Result<()> {
+pub(crate) fn require_no_controls(field: &'static str, value: &str) -> Result<()> {
     if value.chars().any(char::is_control) {
         return Err(Error::validation(
             field,

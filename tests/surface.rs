@@ -21,11 +21,12 @@ use meta_whatsapp::template::{
 };
 use meta_whatsapp::usage::{BusinessUseCaseUsage, UseCaseUsage};
 use meta_whatsapp::{
-    AudioMessage, ButtonMessage, ContactCard, ContactName, ContactOrg, ContactsMessage,
-    DocumentMessage, EmailType, Error, FlowAction, FlowMessage, FlowMode, HeaderText, ImageMessage,
-    InteractiveMessage, ListMessage, ListRow, ListSection, LocationMessage,
-    MediaBytes as ReexportedMediaBytes, MessageBody, PhoneType, ReactionMessage, RecipientType,
-    ReplyButton, StickerMessage, TemplateMessage, TextMessage, UrlType, VideoMessage,
+    AddressMessage, AudioMessage, ButtonMessage, ContactCard, ContactName, ContactOrg,
+    ContactsMessage, DocumentMessage, EmailType, Error, FlowAction, FlowMessage, FlowMode,
+    HeaderText, ImageMessage, InteractiveMessage, ListMessage, ListRow, ListSection,
+    LocationMessage, MediaBytes as ReexportedMediaBytes, MessageBody, PhoneType, ReactionMessage,
+    RecipientType, ReplyButton, StickerMessage, TemplateMessage, TextMessage, UrlType,
+    VideoMessage,
 };
 
 #[test]
@@ -55,6 +56,7 @@ fn every_body_reports_its_wire_type() {
                 .into(),
             "interactive",
         ),
+        (AddressMessage::new("IN", "b").into(), "interactive"),
         (TemplateMessage::new("t", "de").into(), "template"),
     ];
     for (body, expected) in cases {

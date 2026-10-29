@@ -2,10 +2,11 @@
 
 Typed client and webhook toolkit for the [WhatsApp Cloud API](https://developers.facebook.com/docs/whatsapp/cloud-api) (Meta Graph API).
 
-Three independent parts, all usable on their own:
+Four independent parts, all usable on their own:
 
 * **Webhook** — constant-time `X-Hub-Signature-256` verification, GET handshake, replay window, and the payload parsed into types (message events, statuses, unknown future events).
 * **Client** — every message family, media upload/download/delete, template listing, and account administration (business profile, phone-number quality and limits, blocklist, webhook subscriptions).
+* **Address forms** — the `address_message` interactive form and the typed decoder for the `nfm_reply` a customer submits, usable with or without the client.
 * **Account types** — `business`, `subscription` and `usage` modules behind that surface, including Meta's `X-Business-Use-Case-Usage` budget header.
 
 The HTTP layer sits behind the `Transport` trait: tests need no network, and you
@@ -106,11 +107,44 @@ validates before rendering, so an invalid message never reaches the network.
 | location | `LocationMessage` | range- and `NaN`-checked |
 | contacts | `ContactsMessage` + `ContactCard` | name, phones, e-mails, org, URLs, birthday |
 | reaction | `ReactionMessage` | empty emoji removes a reaction |
-| interactive | `ButtonMessage`, `ListMessage`, `FlowMessage` | 1–3 buttons, 1–10 list rows, flows |
+| interactive | `ButtonMessage`, `ListMessage`, `FlowMessage`, `AddressMessage` | 1–3 buttons, 1–10 list rows, flows, address forms |
 | template | `TemplateMessage` | text/currency/date-time/media parameters, header/body/button merges |
 
 Envelope-level features: reply context (`context.message_id`),
 `biz_opaque_callback_data`, and `recipient_type`.
+
+### Address messages
+
+`AddressMessage` is Meta's delivery-address form (`interactive.type` and
+`action.name` are both `address_message`). The documentation scopes it to
+businesses in India; the crate does not police the country beyond its shape,
+and only sends a two-letter ISO 3166-1 alpha-2 `country` because Meta rejects a
+payload without one.
+
+```rust
+use meta_whatsapp::{AddressMessage, AddressValues, MessageRequest, SavedAddress};
+
+let form = AddressMessage::new("IN", "Where should the order go?")
+    .values(AddressValues::new().name("Ada Lovelace").in_pin_code("400063"))
+    .saved_address(SavedAddress::new(
+        "address1",
+        AddressValues::new().city("Pune").in_pin_code("411001"),
+    ));
+client.send(&MessageRequest::new("919876543210", form)).await?;
+```
+
+The fields carry Meta's wire names rather than the prose names: `in_pin_code`
+is the postal code (`zip`), `address` is the street line, and `country` is a
+required action parameter, not a value. Limits: `in_pin_code` ≤ 6 characters
+(the only per-field limit Meta publishes), every other value ≤ 1024 UTF-8
+bytes, body ≤ 1024 bytes, header and footer ≤ 60 characters, and an optional
+`saved_addresses` list with unique ids. Meta publishes no maximum for the
+number of saved addresses, so none is enforced.
+
+The answer comes back as an `nfm_reply` webhook whose `response_json` is a JSON
+*string*; `AddressReply::from_message` finds it and `AddressReply::parse`
+decodes it into `AddressValues`, keeping keys the crate does not model in
+`extra`.
 
 ## Media
 
@@ -236,6 +270,12 @@ to need a patch release — `docs/contracts.md` records the sources:
   counters are ignored, not typed.
 * **Blocklist batch size.** No documented maximum, so none is enforced beyond the
   per-number validation.
+* **Address-message counts.** No documented maximum for `saved_addresses` (or for
+  the number of `validation_errors`), so none is enforced — only the per-entry
+  limits. Meta's address guide also shows the reply both as
+  `interactive.type = nfm_reply` and as `type = interactive` with
+  `action = address_message`; `AddressReply` reads the `nfm_reply` block that
+  both shapes carry.
 
 ## Tracked gaps
 
@@ -243,12 +283,15 @@ A Cloud API surface this crate does not implement is an issue, not an exclusion.
 The list below is the shortcut; the issue is the contract, and an entry leaves
 this section when its issue closes.
 
-* **Catalog / product / order / address messages** — issue #7. Commerce
-  payloads with their own schema churn; `MessageBody` stays `#[non_exhaustive]`
-  so they can land without a breaking release.
+* **Catalog / product / order messages** — issues #19, #20 and #21, the
+  children of #7. Commerce payloads with their own schema churn;
+  `MessageBody` stays `#[non_exhaustive]` so they can land without a breaking
+  release.
 * **Flow data-exchange endpoints** — issue #8. Until then the inbound
-  `nfm_reply` payload is passed through raw (`InteractiveReply::nfm_reply`);
-  decrypting and serving flows is a server concern, not a client one.
+  `nfm_reply` payload of a Flow is passed through raw
+  (`InteractiveReply::nfm_reply`; address replies do have a typed decoder,
+  `AddressReply`); decrypting and serving flows is a server concern, not a
+  client one.
 * **App-level webhook field subscription** (`/{app_id}/subscriptions`) and
   registering the callback URL itself — issue #9.
 * **WABA-level phone-number listing / onboarding** (`GET|POST /{waba_id}/phone_numbers`,
@@ -280,14 +323,17 @@ The suite has five layers:
   truncated JSON, duplicate keys, unknown event types and 32-task concurrency
   tests. `tests/delivery.rs` pins the retry contract call-by-call;
   `tests/account.rs` covers profile/quality/limits/blocklist/subscriptions/usage;
+  `tests/address.rs` covers the address form's exact wire shape, its limits with
+  a boundary pair each, and the `nfm_reply` reply;
   `tests/reqwest_transport.rs` drives the bundled transport against a local
   socket and a refused connection.
 * **Property** (`proptest`) — webhook parsing never panics over arbitrary JSON,
   sign/verify round-trips for arbitrary secrets and bodies, text acceptance
   matches the documented boundary, backoff stays bounded, queries stay
-  percent-encoded, and "no non-idempotent request is retried after a 5xx" holds
-  for every status, budget and attempt count.
-* **Doctest** — every public item has a runnable example (403 doctests).
+  percent-encoded, an address value survives the wire unchanged, and "no
+  non-idempotent request is retried after a 5xx" holds for every status, budget
+  and attempt count.
+* **Doctest** — every public item has a runnable example (441 doctests).
 * **Fuzz** (`fuzz/`, nightly) — one libFuzzer target per parser, each pinning the
   invariant it protects instead of only "does not panic":
   * `webhook_payload` — arbitrary JSON through the permissive parser; a key the

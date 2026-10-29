@@ -14,7 +14,8 @@ use meta_whatsapp::subscription::{validate_waba_id, WebhookSubscriptions};
 use meta_whatsapp::transport::Method;
 use meta_whatsapp::usage::BusinessUseCaseUsage;
 use meta_whatsapp::{
-    Error, MessageRequest, RetryPolicy, TemplateQuery, TextMessage, WebhookPayload, WebhookVerifier,
+    AddressMessage, AddressReply, AddressValues, Error, MessageRequest, RetryPolicy, TemplateQuery,
+    TextMessage, WebhookPayload, WebhookVerifier, ADDRESS_FIELD_MAX_BYTES,
 };
 use percent_encoding::percent_decode_str;
 use proptest::prelude::*;
@@ -557,5 +558,118 @@ fn the_retry_rule_table_is_pinned_for_every_status_class() {
         if (500..600).contains(&status) {
             assert_eq!(send, Action::Ambiguous);
         }
+    }
+}
+
+/// Text short enough that no documented limit can be hit by accident.
+fn arb_short_text() -> impl Strategy<Value = String> {
+    any::<String>().prop_map(|value| value.chars().take(24).collect())
+}
+
+/// `min..=max` ASCII digits.
+fn arb_digits(min: usize, max: usize) -> impl Strategy<Value = String> {
+    prop::collection::vec(prop::sample::select(b"0123456789".to_vec()), min..=max)
+        .prop_map(|digits| digits.into_iter().map(char::from).collect())
+}
+
+/// Seven to fifteen digits, half of them with the optional leading `+`.
+fn arb_phone_number() -> impl Strategy<Value = String> {
+    (arb_digits(7, 15), any::<bool>())
+        .prop_map(|(digits, plus)| if plus { format!("+{digits}") } else { digits })
+}
+
+/// A form where every field is within its limit, so it always validates.
+fn arb_address_values() -> impl Strategy<Value = AddressValues> {
+    (
+        prop::option::of(arb_short_text()),
+        prop::option::of(arb_phone_number()),
+        prop::option::of(arb_digits(0, 6)),
+        prop::option::of(arb_short_text()),
+        prop::option::of(arb_short_text()),
+        prop::option::of(arb_short_text()),
+        prop::option::of(arb_short_text()),
+        prop::option::of(arb_short_text()),
+        prop::option::of(arb_short_text()),
+        prop::option::of(arb_short_text()),
+        prop::option::of(arb_short_text()),
+    )
+        .prop_map(
+            |(
+                name,
+                phone_number,
+                in_pin_code,
+                house_number,
+                floor_number,
+                tower_number,
+                building_name,
+                address,
+                landmark_area,
+                city,
+                state,
+            )| AddressValues {
+                name,
+                phone_number,
+                in_pin_code,
+                house_number,
+                floor_number,
+                tower_number,
+                building_name,
+                address,
+                landmark_area,
+                city,
+                state,
+                extra: Map::new(),
+            },
+        )
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(96))]
+
+    /// The body limit is a byte limit: a string validates exactly when it is
+    /// non-empty and fits `CAPTION_MAX_BYTES`, whatever its characters are.
+    #[test]
+    fn the_address_body_limit_is_a_byte_limit(body in any::<String>()) {
+        let expected = !body.is_empty() && body.len() <= 1024;
+        prop_assert_eq!(AddressMessage::new("IN", body).validate().is_ok(), expected);
+    }
+
+    /// Same invariant for one free-form field, at its own ceiling.
+    #[test]
+    fn the_address_field_limit_is_a_byte_limit(value in any::<String>()) {
+        let expected = value.len() <= ADDRESS_FIELD_MAX_BYTES;
+        prop_assert_eq!(
+            AddressValues::new().city(value).validate().is_ok(),
+            expected
+        );
+    }
+
+    /// Rendering is lossless: whatever went in comes back out of the JSON,
+    /// including non-ASCII text and every documented key.
+    #[test]
+    fn address_values_survive_the_wire(values in arb_address_values()) {
+        let message = AddressMessage::new("IN", "body").values(values.clone());
+        let Ok(json) = MessageRequest::new("919876543210", message).to_json() else {
+            return Err(TestCaseError::fail("valid values must render"));
+        };
+        let rendered = json["interactive"]["action"]["parameters"]["values"].clone();
+        let decoded: AddressValues = serde_json::from_value(rendered)?;
+        prop_assert_eq!(decoded, values);
+    }
+
+    /// A reply the crate serialises is a reply the crate parses.
+    #[test]
+    fn address_replies_round_trip(
+        saved_address_id in prop::option::of(arb_short_text()),
+        values in arb_address_values(),
+    ) {
+        let reply = AddressReply {
+            saved_address_id,
+            values,
+            extra: Map::new(),
+        };
+        let encoded = serde_json::to_string(&reply)?;
+        let decoded = AddressReply::parse(&encoded)?;
+        prop_assert_eq!(decoded, reply);
     }
 }
