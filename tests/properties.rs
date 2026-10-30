@@ -9,13 +9,14 @@ use meta_whatsapp::business::{
     VerificationPin, BLOCK_USER_MAX_DIGITS, BLOCK_USER_MIN_DIGITS, VERIFICATION_PIN_LEN,
 };
 use meta_whatsapp::media::{validate_media_id, MAX_MEDIA_ID_LEN};
+use meta_whatsapp::message::{CAPTION_MAX_BYTES, HEADER_MAX_CHARS};
 use meta_whatsapp::retry::{Action, Attempt, Repeatability};
 use meta_whatsapp::subscription::{validate_waba_id, WebhookSubscriptions};
 use meta_whatsapp::transport::Method;
 use meta_whatsapp::usage::BusinessUseCaseUsage;
 use meta_whatsapp::{
-    Error, MessageRequest, MultiProductMessage, ProductSection, RetryPolicy, TemplateQuery,
-    TextMessage, WebhookPayload, WebhookVerifier,
+    Error, MessageRequest, MultiProductMessage, ProductSection, RetryPolicy, SingleProductMessage,
+    TemplateQuery, TextMessage, WebhookPayload, WebhookVerifier,
 };
 use percent_encoding::percent_decode_str;
 use proptest::prelude::*;
@@ -187,6 +188,54 @@ proptest! {
             "sections {:?}, total {}",
             sections,
             total
+        );
+    }
+
+    /// A single-product payload is accepted exactly inside the documented
+    /// envelope: both ids present and printable, the optional body 1..=1024
+    /// **bytes**, the optional footer at most 60 **characters**. Characters and
+    /// bytes differ across the whole input space, so this pins which unit each
+    /// limit is counted in.
+    #[test]
+    fn single_product_acceptance_matches_the_documented_envelope(
+        catalog_id in prop::collection::vec(prop::char::any(), 0..8),
+        retailer_id in prop::collection::vec(prop::char::any(), 0..8),
+        body in prop::option::of(prop::collection::vec(prop::char::any(), 0..1_100)),
+        footer in prop::option::of(prop::collection::vec(prop::char::any(), 0..70)),
+    ) {
+        let catalog_id: String = catalog_id.into_iter().collect();
+        let retailer_id: String = retailer_id.into_iter().collect();
+        let body: Option<String> = body.map(|chars| chars.into_iter().collect());
+        let footer: Option<String> = footer.map(|chars| chars.into_iter().collect());
+
+        let mut message = SingleProductMessage::new(catalog_id.clone(), retailer_id.clone());
+        if let Some(text) = &body {
+            message = message.body(text.clone());
+        }
+        if let Some(text) = &footer {
+            message = message.footer(text.clone());
+        }
+
+        let printable = |value: &str| !value.is_empty() && !value.chars().any(char::is_control);
+        let expected = printable(&catalog_id)
+            && printable(&retailer_id)
+            && body
+                .as_ref()
+                .is_none_or(|text| !text.is_empty() && text.len() <= CAPTION_MAX_BYTES)
+            && footer
+                .as_ref()
+                .is_none_or(|text| text.chars().count() <= HEADER_MAX_CHARS);
+
+        prop_assert_eq!(
+            message.validate().is_ok(),
+            expected,
+            "ids {:?}/{:?}, body {:?}, footer {:?}",
+            catalog_id,
+            retailer_id,
+            body.as_deref().map(|text| (text.len(), text.chars().count())),
+            footer
+                .as_deref()
+                .map(|text| (text.len(), text.chars().count()))
         );
     }
 
