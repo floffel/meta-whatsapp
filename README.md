@@ -58,7 +58,7 @@ therefore automates only the retries that cannot duplicate anything:
 
 | Failure | Non-idempotent (`POST` send/upload/register, `deregister`) | Idempotent (`GET`, other `DELETE`) |
 | --- | --- | --- |
-| 429 rate limited | retried, honours `Retry-After` | retried, honours `Retry-After` |
+| 429 rate limited | retried; `Retry-After` waited out verbatim, surfaced if it exceeds `max_delay` | same |
 | DNS / connect / TLS failure (before the write) | retried | retried |
 | 5xx | **not retried** → `Error::Ambiguous` | retried with backoff |
 | Timeout or reset after the write | **not retried** → `Error::Ambiguous` | retried |
@@ -211,8 +211,13 @@ with a token the API just rejected.
 * Only 429 and pre-write connection failures are retried automatically; see
   [Delivery semantics](#delivery-semantics).
 * Backoff is exponential and exact, bounded by `RetryPolicy` (default 3
-  attempts, 250 ms doubling to an 8 s ceiling); `Retry-After` is honoured and
-  clamped to `max_delay`.
+  attempts, 250 ms doubling to an 8 s ceiling). A `Retry-After` hint is
+  authoritative and is never shortened: it is waited out verbatim while it fits
+  under `max_delay`, and a longer hint surfaces the 429 (still
+  `is_retryable()`, with `retry_after()` intact) so the caller can schedule it —
+  waiting less than the server asked for only earns a second 429 and burns an
+  attempt. `max_delay` therefore decides *whether* to retry, not how long;
+  `without_retry_after()` ignores the header and lets the curve decide.
 * Per-request timeout via `WhatsAppClient::with_timeout`; waits use
   `tokio::time::sleep` (cancellation safe). Without the `http` feature there is
   no timer to await, so retries happen immediately — bring your own pacing.
