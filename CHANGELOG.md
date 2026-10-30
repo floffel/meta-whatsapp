@@ -76,6 +76,28 @@ of the README.
   delivery cases in `tests/delivery.rs` including a 32-task hammer test on a
   cloned client, and three properties in `tests/properties.rs`.
 
+- Template management: `create_template`, `update_template` and
+  `delete_template`, the typed `TemplateDefinition` / `TemplateUpdate` builders
+  (text and media headers, body, footer, quick-reply/URL/copy-code/phone-number/
+  OTP buttons, authentication templates with `add_security_recommendation` and
+  `code_expiration_minutes`), and the permissive `TemplateAck` /
+  `TemplateDeleteAck` responses. Every limit has a named constant in
+  `meta_whatsapp::template` and every limit is tested from both sides. Creating
+  stays non-idempotent (5xx → `Error::Ambiguous`, no re-send); the edit is a
+  `POST` too — Meta's `Edit template` operation, no `PUT` exists for it — but it
+  replaces one name/language pair, so the client retries it like the delete.
+  Closes #10.
+- Catalog, single-product, multi-product, order-details, order-status and
+  address messages, with typed validation and named limit constants in
+  `meta_whatsapp::commerce`.
+- Permissive inbound order parsing on `Message::order()`, including camelCase
+  aliases and numeric strings, and address replies on `Message::address()` for
+  both `interactive.address_message` and top-level `address` payloads.
+- `tests/commerce.rs` covers every wire shape and both sides of every limit;
+  the existing `webhook_payload` fuzz target exercises the inbound parsers.
+  Closes #7, #19, #20 and #21.
+
+
 ### Changed
 - `transport::Request` and `RequestBody` now redact in `Debug`: the access token
   is replaced with `[redacted]`, and so is any body field named `pin`,

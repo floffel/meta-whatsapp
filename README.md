@@ -147,6 +147,50 @@ restricted to `[A-Za-z0-9_-]` so they cannot escape the URL path.
 `status`, `name`, `language`, `fields`). `TemplateList::has_next_page` tells you
 whether to follow `paging.next`.
 
+Management uses the phone-number endpoint and a typed definition, so the text
+Meta reviews is built and validated instead of pasted together:
+
+| Call | Endpoint | Returns |
+| --- | --- | --- |
+| `create_template` | `POST /{phone_number_id}/message_templates` | `TemplateAck` (`id`, `status`, `category`) |
+| `update_template` | `POST /{phone_number_id}/message_templates` (name + language select the template) | `TemplateAck` (`success`) |
+| `delete_template` | `DELETE /{phone_number_id}/message_templates?name=…` | `TemplateDeleteAck` (`success`) |
+
+```rust,no_run
+use meta_whatsapp::{TemplateButton, TemplateCategory, TemplateDefinition};
+
+let definition = TemplateDefinition::new("order_update", "de_DE", TemplateCategory::Utility)
+    .header_text("Ihre Bestellung {{1}}")
+    .header_example("1234")
+    .body_text("Hallo {{1}}, die Bestellung {{2}} ist unterwegs.")
+    .body_example("Florian")
+    .body_example("1234")
+    .footer_text("Danke für Ihren Einkauf")
+    .button(TemplateButton::quick_reply("Alles klar"));
+```
+
+`TemplateDefinition` covers the four component kinds — `HEADER` (text, image,
+video, document, location), `BODY`, `FOOTER` and `BUTTONS` (quick reply, URL,
+copy code, phone number, OTP) — plus authentication templates
+(`security_recommendation`, `code_expiration_minutes`, `TemplateOtpType`) and
+the `POSITIONAL`/`NAMED` parameter formats. Every limit is a named constant in
+`meta_whatsapp::template`, and the builder refuses what Meta would refuse: a
+placeholder without an example, a media header without exactly one handle, more
+than two URL buttons, more than one copy-code button, more than ten buttons or
+four components, a button label over 25 characters. `TemplateUpdate` carries
+only what an edit changes (a category, some components, or both) and rejects an
+edit that would change nothing.
+
+Creating a template is not repeatable — Meta assigns a new id per POST — so a
+5xx or a lost response surfaces as `Error::Ambiguous` and is never re-sent. The
+edit is a `POST` too (Meta's `Edit template` operation, *not* a `PUT`: the v23
+OpenAPI file documents no `PUT` on `message_templates`), but it replaces the
+definition of one name and language, so the client classifies it as repeatable
+and retries a 5xx. Delete is idempotent as well. The acknowledgements decode
+permissively: both `{id, status, category}` and `{"success": true}` parse,
+unknown members stay in `extra`, and `is_success()` is only `false` when Meta
+explicitly said so.
+
 ## Business account
 
 Account administration for the number the client is bound to:
@@ -318,7 +362,7 @@ cargo test --no-default-features    # same, without reqwest/tokio
 cargo clippy --all-targets --all-features -- -D warnings
 cargo doc --no-deps
 cargo deny check
-cargo llvm-cov --all-features --summary-only   # 96.3 % lines, gate at 95 %
+cargo llvm-cov --all-features --summary-only   # 95.6 % lines, gate at 95 %
 cargo fuzz run webhook_payload      # nightly; one target per parser, see below
 ```
 
@@ -332,6 +376,8 @@ The suite has five layers:
   truncated JSON, duplicate keys, unknown event types and 32-task concurrency
   tests. `tests/delivery.rs` pins the retry contract call-by-call;
   `tests/account.rs` covers profile/quality/limits/blocklist/subscriptions/usage;
+  `tests/templates.rs` covers template create/edit/delete: method, path, body,
+  the retry class of each verb and both sides of every template limit;
   `tests/reqwest_transport.rs` drives the bundled transport against a local
   socket and a refused connection.
 * **Property** (`proptest`) — webhook parsing never panics over arbitrary JSON,
@@ -339,7 +385,7 @@ The suite has five layers:
   matches the documented boundary, backoff stays bounded, queries stay
   percent-encoded, and "no non-idempotent request is retried after a 5xx" holds
   for every status, budget and attempt count.
-* **Doctest** — every public item has a runnable example (403 doctests).
+* **Doctest** — every public item has a runnable example (539 doctests).
 * **Fuzz** (`fuzz/`, nightly) — one libFuzzer target per parser, each pinning the
   invariant it protects instead of only "does not panic":
   * `webhook_payload` — arbitrary JSON through the permissive parser; a key the
