@@ -14,6 +14,9 @@ use meta_whatsapp::business::{
     PhoneNumberInfo, QualityRating, PROFILE_WEBSITE_MAX_CHARS,
 };
 use meta_whatsapp::media::{MediaBytes, MediaInfo, MediaRef, MediaUpload, MAX_LINK_LEN};
+use meta_whatsapp::message::{
+    PRODUCTS_MAX, PRODUCT_ITEMS_MAX, PRODUCT_SECTIONS_MAX, PRODUCT_SECTION_TITLE_MAX_CHARS,
+};
 use meta_whatsapp::subscription::{SubscriptionConfig, SubscriptionState, WebhookSubscriptions};
 use meta_whatsapp::template::{
     TemplateButtonType, TemplateComponent, TemplateLanguage, TemplateMediaKind, TemplateParameter,
@@ -24,10 +27,11 @@ use meta_whatsapp::{
     AudioMessage, ButtonMessage, ContactCard, ContactName, ContactOrg, ContactsMessage,
     DocumentMessage, EmailType, Error, FlowAction, FlowMessage, FlowMode, HeaderText, ImageMessage,
     InteractiveMessage, ListMessage, ListRow, ListSection, LocationMessage,
-    MediaBytes as ReexportedMediaBytes, MessageBody, PhoneType, ReactionMessage, RecipientType,
-    RegisterRequest, RegistrationBackup, ReplyButton, StickerMessage, SuccessOutcome,
-    TemplateMessage, TextMessage, TwoStepVerificationRequest, UrlType, VerificationPin,
-    VideoMessage, VERIFICATION_PIN_LEN,
+    MediaBytes as ReexportedMediaBytes, MessageBody, MultiProductMessage, PhoneType, ProductItem,
+    ProductSection, ReactionMessage, RecipientType, RegisterRequest, RegistrationBackup,
+    ReplyButton, SingleProductMessage, StickerMessage, SuccessOutcome, TemplateMessage,
+    TextMessage, TwoStepVerificationRequest, UrlType, VerificationPin, VideoMessage,
+    VERIFICATION_PIN_LEN,
 };
 
 #[test]
@@ -55,6 +59,18 @@ fn every_body_reports_its_wire_type() {
         (
             InteractiveMessage::Buttons(ButtonMessage::new("b", vec![ReplyButton::new("i", "t")]))
                 .into(),
+            "interactive",
+        ),
+        (
+            InteractiveMessage::Product(SingleProductMessage::new("c", "sku")).into(),
+            "interactive",
+        ),
+        (
+            InteractiveMessage::ProductList(
+                MultiProductMessage::new("c", "Katalog", "Bitte wählen")
+                    .section(ProductSection::from_ids(["sku"])),
+            )
+            .into(),
             "interactive",
         ),
         (TemplateMessage::new("t", "de").into(), "template"),
@@ -573,6 +589,65 @@ fn contact_cards_cover_every_builder() {
         .last_name("Lovelace");
     assert_eq!(name.first_name.as_deref(), Some("Ada"));
     assert_eq!(name.last_name.as_deref(), Some("Lovelace"));
+}
+
+#[test]
+fn catalog_builders_cover_products_and_their_limits() {
+    // The documented caps, named once so a wire change trips a test.
+    assert_eq!(PRODUCT_SECTION_TITLE_MAX_CHARS, 24);
+    assert_eq!(PRODUCT_SECTIONS_MAX, 10);
+    assert_eq!(PRODUCT_ITEMS_MAX, 30);
+    assert_eq!(PRODUCTS_MAX, 30);
+
+    // A product item carries exactly one field and compares by value.
+    let item = ProductItem::new("sku-42");
+    assert_eq!(item.product_retailer_id, "sku-42");
+    assert_eq!(item, item.clone());
+    assert!(item.validate().is_ok());
+    assert!(ProductItem::new("").validate().is_err());
+    assert!(ProductItem::new("sk\u{1}u").validate().is_err());
+
+    // Sections can be built from items or from ids, and grown one product at a
+    // time; `title` is the only optional field.
+    let built = ProductSection::new(vec![ProductItem::new("a")]).item(ProductItem::new("b"));
+    assert_eq!(built.product_items.len(), 2);
+    assert!(built.title.is_none());
+    assert_eq!(
+        ProductSection::from_ids(["a", "b"]).product_items,
+        built.product_items
+    );
+    assert_eq!(
+        ProductSection::from_ids(Vec::<String>::new())
+            .product_items
+            .len(),
+        0,
+        "an id iterator may be empty; the message rejects that"
+    );
+    let titled = ProductSection::from_ids(["a"]).title("ä".repeat(24));
+    assert_eq!(titled.title.as_deref(), Some("ä".repeat(24).as_str()));
+    // Section bounds surface through the message, which owns the context.
+    let with_title = MultiProductMessage::new("c", "Katalog", "Bitte wählen").section(titled);
+    assert!(with_title.validate().is_ok());
+
+    // Single product: both ids required, body and footer optional.
+    let single = SingleProductMessage::new("367025965434465", "sku-42");
+    assert!(single.validate().is_ok());
+    assert_eq!(single.catalog_id, "367025965434465");
+    assert_eq!(single.product_retailer_id, "sku-42");
+    assert!(single.clone().body("Text").body.is_some());
+    assert!(single.footer("Impressum").footer.is_some());
+
+    // Multi product: header and body are part of the constructor because the
+    // contract requires both for `product_list`.
+    let multi = MultiProductMessage::new("146265584024623", "Katalog", "Bitte wählen")
+        .section(ProductSection::from_ids(["a"]))
+        .footer("Versand frei");
+    assert!(multi.validate().is_ok());
+    assert_eq!(multi.header.text, "Katalog");
+    assert_eq!(multi.body, "Bitte wählen");
+    assert_eq!(multi.footer.as_deref(), Some("Versand frei"));
+    assert_eq!(multi.sections.len(), 1);
+    assert_eq!(multi.catalog_id, "146265584024623");
 }
 
 #[test]

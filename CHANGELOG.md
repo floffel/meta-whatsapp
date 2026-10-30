@@ -10,6 +10,27 @@ of the README.
 ## [Unreleased]
 
 ### Added
+- Catalog product messages (#19): `SingleProductMessage` (`interactive.type`
+  `product`) and `MultiProductMessage` (`product_list`) with `ProductSection` and
+  `ProductItem`, plus the matching `InteractiveMessage::Product` /
+  `InteractiveMessage::ProductList` variants and `From` conversions into
+  `InteractiveMessage` and `MessageBody`. The contract's asymmetries are in the
+  types rather than in a runtime check: `product_list` needs a text header and a
+  body, so `MultiProductMessage::new` takes both, while `product` forbids a
+  header and allows the body to be omitted, so `SingleProductMessage` has no
+  header field at all.
+- Catalog limits as named constants: `PRODUCT_SECTIONS_MAX` (10),
+  `PRODUCT_ITEMS_MAX` (30 per section), `PRODUCTS_MAX` (30 in the whole message,
+  Meta's reference cap on top of the per-section one) and
+  `PRODUCT_SECTION_TITLE_MAX_CHARS` (24). Section titles are required once a
+  message has more than one section, and `catalog_id` / `product_retailer_id`
+  must be present and printable before anything is rendered —
+  `Error::Validation` names the offending wire field.
+- Tests: four recording-transport tests pinning the exact JSON body of both
+  families (`tests/messages.rs`), a boundary matrix for each limit including
+  multi-byte titles and the 30/31-product split across sections, a proptest
+  pinning multi-product acceptance to the documented envelope, and the new
+  builders added to the surface sweep.
 - Phone-number lifecycle (#13): `WhatsAppClient::register`,
   `WhatsAppClient::register_with_backup`, `WhatsAppClient::deregister` and
   `WhatsAppClient::set_two_step_verification_pin`, with the matching

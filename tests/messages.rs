@@ -8,7 +8,8 @@ use meta_whatsapp::{
     AudioMessage, ButtonMessage, ContactCard, ContactOrg, ContactsMessage, DocumentMessage,
     EmailType, FlowAction, FlowMessage, FlowMode, HeaderText, ImageMessage, InteractiveMessage,
     ListMessage, ListRow, ListSection, LocationMessage, MediaRef, MessageBody, MessageRequest,
-    PhoneType, ReactionMessage, ReplyButton, StickerMessage, TextMessage, UrlType, VideoMessage,
+    MultiProductMessage, PhoneType, ProductItem, ProductSection, ReactionMessage, ReplyButton,
+    SingleProductMessage, StickerMessage, TextMessage, UrlType, VideoMessage,
 };
 use serde_json::{json, Value};
 
@@ -308,6 +309,139 @@ async fn flow_renders_action_parameters() {
 }
 
 #[tokio::test]
+async fn single_product_message_renders_the_catalog_action() {
+    let transport = MockTransport::new();
+    let client = client(transport.clone());
+    let product = SingleProductMessage::new("367025965434465", "sku-42")
+        .body("Nur heute 10 %")
+        .footer("Inkl. MwSt.");
+
+    client
+        .send(&MessageRequest::new("4915112345678", product))
+        .await
+        .unwrap();
+
+    let call = transport.only_call();
+    assert_eq!(call.method.as_str(), "POST");
+    assert_eq!(
+        call.url,
+        "https://graph.facebook.com/v21.0/106540352242922/messages"
+    );
+    assert_eq!(
+        json_body(&call),
+        &json!({
+            "messaging_product": "whatsapp",
+            "recipient_type": "individual",
+            "to": "4915112345678",
+            "type": "interactive",
+            "interactive": {
+                "type": "product",
+                "body": { "text": "Nur heute 10 %" },
+                "footer": { "text": "Inkl. MwSt." },
+                "action": {
+                    "catalog_id": "367025965434465",
+                    "product_retailer_id": "sku-42"
+                }
+            }
+        })
+    );
+}
+
+#[tokio::test]
+async fn single_product_message_omits_body_and_footer_when_unset() {
+    let transport = MockTransport::new();
+    let client = client(transport.clone());
+    let product = SingleProductMessage::new("367025965434465", "sku-42");
+
+    client
+        .send(&MessageRequest::new("1", product))
+        .await
+        .unwrap();
+
+    let body = json_body(&transport.only_call()).clone();
+    assert_eq!(
+        body["interactive"],
+        json!({
+            "type": "product",
+            "action": {
+                "catalog_id": "367025965434465",
+                "product_retailer_id": "sku-42"
+            }
+        })
+    );
+    assert!(body["interactive"].get("header").is_none(), "{body}");
+}
+
+#[tokio::test]
+async fn multi_product_message_renders_sections_and_product_items() {
+    let transport = MockTransport::new();
+    let client = client(transport.clone());
+    let message = MultiProductMessage::new("146265584024623", "Unser Katalog", "Bitte wählen")
+        .section(
+            ProductSection::new(vec![ProductItem::new("sku-a"), ProductItem::new("sku-b")])
+                .title("Neu"),
+        )
+        .section(ProductSection::from_ids(["sku-c"]).title("Angebote"))
+        .footer("Versand frei ab 50 €");
+
+    client
+        .send(&MessageRequest::new("4915112345678", message))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        json_body(&transport.only_call()),
+        &json!({
+            "messaging_product": "whatsapp",
+            "recipient_type": "individual",
+            "to": "4915112345678",
+            "type": "interactive",
+            "interactive": {
+                "type": "product_list",
+                "header": { "type": "text", "text": "Unser Katalog" },
+                "body": { "text": "Bitte wählen" },
+                "footer": { "text": "Versand frei ab 50 €" },
+                "action": {
+                    "catalog_id": "146265584024623",
+                    "sections": [
+                        {
+                            "title": "Neu",
+                            "product_items": [
+                                { "product_retailer_id": "sku-a" },
+                                { "product_retailer_id": "sku-b" }
+                            ]
+                        },
+                        {
+                            "title": "Angebote",
+                            "product_items": [{ "product_retailer_id": "sku-c" }]
+                        }
+                    ]
+                }
+            }
+        })
+    );
+}
+
+#[tokio::test]
+async fn multi_product_message_with_one_section_needs_no_title() {
+    let transport = MockTransport::new();
+    let client = client(transport.clone());
+    let message = MultiProductMessage::new("1", "Katalog", "Bitte wählen")
+        .section(ProductSection::from_ids(["sku"]));
+
+    client
+        .send(&MessageRequest::new("1", message))
+        .await
+        .unwrap();
+
+    let body = json_body(&transport.only_call()).clone();
+    let section = &body["interactive"]["action"]["sections"][0];
+    assert!(section.get("title").is_none(), "{section}");
+    assert_eq!(section["product_items"][0]["product_retailer_id"], "sku");
+    assert!(body["interactive"].get("footer").is_none(), "{body}");
+}
+
+#[tokio::test]
 async fn template_renders_name_language_and_components() {
     let transport = MockTransport::new();
     let client = client(transport.clone());
@@ -536,15 +670,301 @@ fn list_row_limit_is_ten_in_total() {
 }
 
 #[test]
+fn multi_product_sections_are_capped_at_ten() {
+    let with_titles = |count: usize| {
+        (0..count).map(|index| {
+            ProductSection::from_ids([format!("sku-{index}")]).title(format!("Abschnitt {index}"))
+        })
+    };
+    let ten = with_titles(10).fold(
+        MultiProductMessage::new("1", "Katalog", "Bitte wählen"),
+        MultiProductMessage::section,
+    );
+    assert!(MessageRequest::new("1", ten).to_json().is_ok());
+
+    let eleven = with_titles(11).fold(
+        MultiProductMessage::new("1", "Katalog", "Bitte wählen"),
+        MultiProductMessage::section,
+    );
+    assert_rejected(
+        MessageRequest::new("1", eleven),
+        "interactive.action.sections",
+    );
+
+    assert_rejected(
+        MessageRequest::new(
+            "1",
+            MultiProductMessage::new("1", "Katalog", "Bitte wählen"),
+        ),
+        "interactive.action.sections",
+    );
+}
+
+#[test]
+fn multi_product_is_capped_at_thirty_products_overall() {
+    let one_section = |count: usize| ProductSection::from_ids((0..count).map(|n| format!("s{n}")));
+
+    // Exactly 30 products in one section, and split across two sections.
+    for sections in [
+        vec![one_section(30)],
+        vec![one_section(15).title("A"), one_section(15).title("B")],
+    ] {
+        let message = sections.into_iter().fold(
+            MultiProductMessage::new("1", "Katalog", "Bitte wählen"),
+            MultiProductMessage::section,
+        );
+        assert!(MessageRequest::new("1", message).to_json().is_ok());
+    }
+
+    // 31 products spread over two sections, each within the per-section cap.
+    let too_many = [one_section(16).title("A"), one_section(15).title("B")]
+        .into_iter()
+        .fold(
+            MultiProductMessage::new("1", "Katalog", "Bitte wählen"),
+            MultiProductMessage::section,
+        );
+    assert_rejected(
+        MessageRequest::new("1", too_many),
+        "interactive.action.sections.product_items",
+    );
+
+    // 31 products in one section trips the per-section cap first.
+    assert_rejected(
+        MessageRequest::new(
+            "1",
+            MultiProductMessage::new("1", "Katalog", "Bitte wählen").section(one_section(31)),
+        ),
+        "interactive.action.sections.product_items",
+    );
+
+    // A section without products is not a section.
+    assert_rejected(
+        MessageRequest::new(
+            "1",
+            MultiProductMessage::new("1", "Katalog", "Bitte wählen").section(one_section(0)),
+        ),
+        "interactive.action.sections.product_items",
+    );
+}
+
+#[test]
+fn product_section_titles_are_capped_at_24_characters() {
+    // 24 characters, all of them multi-byte: characters, not bytes, are counted.
+    let at_limit = ProductSection::from_ids(["sku"]).title("ä".repeat(24));
+    assert!(MessageRequest::new(
+        "1",
+        MultiProductMessage::new("1", "Katalog", "Bitte wählen").section(at_limit)
+    )
+    .to_json()
+    .is_ok());
+
+    let over_limit = ProductSection::from_ids(["sku"]).title("🛒".repeat(25));
+    assert_rejected(
+        MessageRequest::new(
+            "1",
+            MultiProductMessage::new("1", "Katalog", "Bitte wählen").section(over_limit),
+        ),
+        "interactive.action.sections.title",
+    );
+
+    let empty = ProductSection::from_ids(["sku"]).title("");
+    assert_rejected(
+        MessageRequest::new(
+            "1",
+            MultiProductMessage::new("1", "Katalog", "Bitte wählen").section(empty),
+        ),
+        "interactive.action.sections.title",
+    );
+}
+
+#[test]
+fn more_than_one_section_needs_a_title_on_each() {
+    let titled = ProductSection::from_ids(["a"]).title("Neu");
+    let untitled = ProductSection::from_ids(["b"]);
+    assert_rejected(
+        MessageRequest::new(
+            "1",
+            MultiProductMessage::new("1", "Katalog", "Bitte wählen")
+                .section(titled)
+                .section(untitled),
+        ),
+        "interactive.action.sections.title",
+    );
+}
+
+#[test]
+fn catalog_text_bounds_follow_the_interactive_limits() {
+    let product = |body: String, footer: String| {
+        SingleProductMessage::new("1", "sku")
+            .body(body)
+            .footer(footer)
+    };
+    // Body: 1024 bytes accepted, 1025 refused.
+    assert!(
+        MessageRequest::new("1", product("x".repeat(1024), "f".repeat(60)))
+            .to_json()
+            .is_ok()
+    );
+    assert_rejected(
+        MessageRequest::new("1", product("x".repeat(1025), "f".repeat(60))),
+        "interactive.body.text",
+    );
+    assert_rejected(
+        MessageRequest::new("1", product("x".repeat(1024), "f".repeat(61))),
+        "interactive.footer.text",
+    );
+    assert_rejected(
+        MessageRequest::new("1", product(String::new(), "f".to_string())),
+        "interactive.body.text",
+    );
+
+    // The multi-product header is required and bounded at 60 characters.
+    let with_header = |header: &str, body: &str, footer: &str| {
+        MultiProductMessage::new("1", header, body)
+            .section(ProductSection::from_ids(["sku"]))
+            .footer(footer)
+    };
+    assert!(MessageRequest::new(
+        "1",
+        with_header(&"h".repeat(60), &"b".repeat(1024), &"f".repeat(60))
+    )
+    .to_json()
+    .is_ok());
+    assert_rejected(
+        MessageRequest::new("1", with_header(&"h".repeat(61), "b", "f")),
+        "interactive.header.text",
+    );
+    assert_rejected(
+        MessageRequest::new("1", with_header("h", "b", &"f".repeat(61))),
+        "interactive.footer.text",
+    );
+    assert_rejected(
+        MessageRequest::new("1", with_header("h", &"b".repeat(1025), "f")),
+        "interactive.body.text",
+    );
+    assert_rejected(
+        MessageRequest::new("1", with_header("", "b", "f")),
+        "interactive.header.text",
+    );
+    assert_rejected(
+        MessageRequest::new("1", with_header("h", "", "f")),
+        "interactive.body.text",
+    );
+}
+
+#[test]
+fn catalog_ids_must_be_present_and_printable() {
+    assert_rejected(
+        MessageRequest::new("1", SingleProductMessage::new("", "sku")),
+        "interactive.action.catalog_id",
+    );
+    assert_rejected(
+        MessageRequest::new("1", SingleProductMessage::new("1", "")),
+        "interactive.action.product_retailer_id",
+    );
+    assert_rejected(
+        MessageRequest::new("1", SingleProductMessage::new("1\t2", "sku")),
+        "interactive.action.catalog_id",
+    );
+    assert_rejected(
+        MessageRequest::new(
+            "1",
+            MultiProductMessage::new("", "Katalog", "Bitte wählen")
+                .section(ProductSection::from_ids(["sku"])),
+        ),
+        "interactive.action.catalog_id",
+    );
+    assert_rejected(
+        MessageRequest::new(
+            "1",
+            MultiProductMessage::new("1", "Katalog", "Bitte wählen")
+                .section(ProductSection::from_ids([""])),
+        ),
+        "interactive.action.sections.product_items.product_retailer_id",
+    );
+    assert_rejected(
+        MessageRequest::new(
+            "1",
+            MultiProductMessage::new("1", "Katalog", "Bitte wählen")
+                .section(ProductSection::from_ids(["sk\u{7}u"])),
+        ),
+        "interactive.action.sections.product_items.product_retailer_id",
+    );
+}
+
+#[test]
 fn interactive_enum_dispatches_to_each_variant() {
     let buttons =
         InteractiveMessage::Buttons(ButtonMessage::new("b", vec![ReplyButton::new("i", "t")]));
     assert_eq!(buttons.kind(), "button");
     assert!(MessageRequest::new("1", buttons).to_json().is_ok());
 
+    let list = InteractiveMessage::List(
+        ListMessage::new("b", "Öffnen").section(ListSection::new(vec![ListRow::new("i", "t")])),
+    );
+    assert_eq!(list.kind(), "list");
+    assert!(MessageRequest::new("1", list).to_json().is_ok());
+
     let flow = InteractiveMessage::Flow(FlowMessage::new("f", "go", FlowAction::DataExchange));
     assert_eq!(flow.kind(), "flow");
     assert!(MessageRequest::new("1", flow).to_json().is_ok());
+
+    let product = InteractiveMessage::Product(SingleProductMessage::new("c", "sku"));
+    assert_eq!(product.kind(), "product");
+    assert!(MessageRequest::new("1", product).to_json().is_ok());
+
+    let list = InteractiveMessage::ProductList(
+        MultiProductMessage::new("c", "Katalog", "Bitte wählen")
+            .section(ProductSection::from_ids(["sku"])),
+    );
+    assert_eq!(list.kind(), "product_list");
+    assert!(MessageRequest::new("1", list).to_json().is_ok());
+
+    // The invalid variants are refused through the same dispatch.
+    let empty = InteractiveMessage::ProductList(MultiProductMessage::new("c", "Katalog", "B"));
+    assert!(empty.validate().is_err());
+    assert!(MessageRequest::new("1", empty).to_json().is_err());
+}
+
+#[test]
+fn catalog_messages_are_reachable_as_message_bodies() {
+    assert_eq!(
+        MessageBody::from(SingleProductMessage::new("c", "sku")).message_type(),
+        "interactive"
+    );
+    assert_eq!(
+        MessageBody::from(
+            MultiProductMessage::new("c", "Katalog", "Bitte wählen")
+                .section(ProductSection::from_ids(["sku"]))
+        )
+        .message_type(),
+        "interactive"
+    );
+    assert_eq!(
+        InteractiveMessage::from(SingleProductMessage::new("c", "sku")).kind(),
+        "product"
+    );
+    assert_eq!(
+        InteractiveMessage::from(MultiProductMessage::new("c", "Katalog", "B")).kind(),
+        "product_list"
+    );
+
+    // The three older interactive families convert the same way.
+    assert_eq!(
+        InteractiveMessage::from(ButtonMessage::new("b", vec![ReplyButton::new("i", "t")])).kind(),
+        "button"
+    );
+    assert_eq!(
+        InteractiveMessage::from(
+            ListMessage::new("b", "c").section(ListSection::new(vec![ListRow::new("i", "t")]))
+        )
+        .kind(),
+        "list"
+    );
+    assert_eq!(
+        InteractiveMessage::from(FlowMessage::new("f", "c", FlowAction::DataExchange)).kind(),
+        "flow"
+    );
 }
 
 #[test]

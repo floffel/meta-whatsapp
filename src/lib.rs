@@ -7,10 +7,10 @@
 //!   replay window, and parse the payload into types (message events, status
 //!   events, and unknown future events).
 //! * [`client`] — send every message family (text, media, location, contacts,
-//!   reaction, interactive buttons/list/flow, templates), upload/download/delete
-//!   media, list templates, and administer the account (business profile,
-//!   phone-number quality and limits, register/deregister and the two-step
-//!   verification PIN, blocklist, webhook subscriptions).
+//!   reaction, interactive buttons/list/flow/catalog products, templates),
+//!   upload/download/delete media, list templates, and administer the account
+//!   (business profile, phone-number quality and limits, register/deregister
+//!   and the two-step verification PIN, blocklist, webhook subscriptions).
 //! * [`business`], [`subscription`], [`usage`] — the typed shapes behind that
 //!   administration surface, including Meta's `X-Business-Use-Case-Usage`
 //!   budget header.
@@ -115,8 +115,9 @@ pub use message::{
     AudioMessage, ButtonMessage, ContactCard, ContactEmail, ContactName, ContactOrg, ContactPhone,
     ContactsMessage, DocumentMessage, EmailType, FlowAction, FlowMessage, FlowMode, HeaderText,
     ImageMessage, InteractiveMessage, ListMessage, ListRow, ListSection, LocationMessage,
-    MessageBody, MessageRequest, PhoneType, ReactionMessage, RecipientType, ReplyButton,
-    StickerMessage, TextMessage, UrlType, VideoMessage,
+    MessageBody, MessageRequest, MultiProductMessage, PhoneType, ProductItem, ProductSection,
+    ReactionMessage, RecipientType, ReplyButton, SingleProductMessage, StickerMessage, TextMessage,
+    UrlType, VideoMessage,
 };
 pub use retry::{Action, Attempt, Repeatability, RetryPolicy};
 pub use subscription::{

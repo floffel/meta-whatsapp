@@ -14,7 +14,8 @@ use meta_whatsapp::subscription::{validate_waba_id, WebhookSubscriptions};
 use meta_whatsapp::transport::Method;
 use meta_whatsapp::usage::BusinessUseCaseUsage;
 use meta_whatsapp::{
-    Error, MessageRequest, RetryPolicy, TemplateQuery, TextMessage, WebhookPayload, WebhookVerifier,
+    Error, MessageRequest, MultiProductMessage, ProductSection, RetryPolicy, TemplateQuery,
+    TextMessage, WebhookPayload, WebhookVerifier,
 };
 use percent_encoding::percent_decode_str;
 use proptest::prelude::*;
@@ -162,6 +163,31 @@ proptest! {
         if failed >= attempts.max(1) {
             prop_assert!(policy.delay(failed, None).is_none());
         }
+    }
+
+    /// A multi-product payload is accepted exactly inside the documented
+    /// envelope: 1..=10 sections, 1..=30 products each, 30 at most in total.
+    #[test]
+    fn multi_product_acceptance_matches_the_documented_envelope(
+        sections in prop::collection::vec(0_usize..33, 0..13),
+    ) {
+        let mut message = MultiProductMessage::new("catalog", "Katalog", "Bitte wählen");
+        for (index, count) in sections.iter().enumerate() {
+            let ids = (0..*count).map(|product| format!("sku-{index}-{product}"));
+            message = message.section(ProductSection::from_ids(ids).title(format!("S{index}")));
+        }
+
+        let total: usize = sections.iter().sum();
+        let expected = (1..=10).contains(&sections.len())
+            && sections.iter().all(|count| (1..=30).contains(count))
+            && total <= 30;
+        prop_assert_eq!(
+            message.validate().is_ok(),
+            expected,
+            "sections {:?}, total {}",
+            sections,
+            total
+        );
     }
 
     /// The delivery contract, pinned: whatever the status, whatever the budget,

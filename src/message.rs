@@ -1,5 +1,5 @@
 //! Typed outbound messages: text, media, location, contacts, reactions,
-//! interactive (buttons/list/flow) and templates.
+//! interactive (buttons/list/flow/catalog products) and templates.
 //!
 //! Every family is a plain struct with a constructor and chainable setters.
 //! [`MessageRequest::to_json`] validates before it renders, so a malformed
@@ -56,6 +56,41 @@ pub const LIST_ROWS_MAX: usize = 10;
 
 /// Maximum number of sections in a list message.
 pub const LIST_SECTIONS_MAX: usize = 10;
+
+/// Limit for a multi-product section title (characters).
+///
+/// ```
+/// use meta_whatsapp::message::PRODUCT_SECTION_TITLE_MAX_CHARS;
+/// assert_eq!(PRODUCT_SECTION_TITLE_MAX_CHARS, 24);
+/// ```
+pub const PRODUCT_SECTION_TITLE_MAX_CHARS: usize = 24;
+
+/// Maximum number of sections in a multi-product message.
+///
+/// ```
+/// use meta_whatsapp::message::PRODUCT_SECTIONS_MAX;
+/// assert_eq!(PRODUCT_SECTIONS_MAX, 10);
+/// ```
+pub const PRODUCT_SECTIONS_MAX: usize = 10;
+
+/// Maximum number of products in one section of a multi-product message.
+///
+/// ```
+/// use meta_whatsapp::message::PRODUCT_ITEMS_MAX;
+/// assert_eq!(PRODUCT_ITEMS_MAX, 30);
+/// ```
+pub const PRODUCT_ITEMS_MAX: usize = 30;
+
+/// Maximum number of products across all sections of a multi-product message.
+///
+/// The spec caps `product_items` per section; Meta's reference additionally
+/// caps the message as a whole at 30 products, so both apply.
+///
+/// ```
+/// use meta_whatsapp::message::PRODUCTS_MAX;
+/// assert_eq!(PRODUCTS_MAX, 30);
+/// ```
+pub const PRODUCTS_MAX: usize = 30;
 
 /// Limit for location name/address and contact fields.
 pub const FREEFORM_MAX_BYTES: usize = 1024;
@@ -2432,7 +2467,484 @@ impl FlowMessage {
     }
 }
 
-/// Any interactive message: buttons, list or flow.
+/// One product inside a catalog, referenced by its retailer id.
+///
+/// ```
+/// use meta_whatsapp::ProductItem;
+///
+/// let item = ProductItem::new("sku-42");
+/// assert_eq!(item.product_retailer_id, "sku-42");
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProductItem {
+    /// The retailer id (SKU) of the product in the catalog.
+    pub product_retailer_id: String,
+}
+
+impl ProductItem {
+    /// A product reference; the id is validated when the message renders.
+    ///
+    /// ```
+    /// use meta_whatsapp::ProductItem;
+    /// assert!(ProductItem::new("di9ozbzfi4").validate().is_ok());
+    /// ```
+    pub fn new(product_retailer_id: impl Into<String>) -> Self {
+        Self {
+            product_retailer_id: product_retailer_id.into(),
+        }
+    }
+
+    /// Checks that the retailer id is present and printable.
+    ///
+    /// ```
+    /// use meta_whatsapp::ProductItem;
+    ///
+    /// assert!(ProductItem::new("sku-42").validate().is_ok());
+    /// assert!(ProductItem::new("").validate().is_err());
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an empty id or one containing control
+    /// characters. The contract pins no maximum length, so none is enforced.
+    pub fn validate(&self) -> Result<()> {
+        require_identifier(
+            "interactive.action.sections.product_items.product_retailer_id",
+            &self.product_retailer_id,
+        )
+    }
+
+    fn render(&self) -> Value {
+        json!({ "product_retailer_id": self.product_retailer_id })
+    }
+}
+
+/// A titled group of products in a multi-product message.
+///
+/// ```
+/// use meta_whatsapp::{ProductItem, ProductSection};
+///
+/// let section = ProductSection::new(vec![ProductItem::new("sku-42")]).title("Neu");
+/// assert_eq!(section.product_items.len(), 1);
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProductSection {
+    /// Optional title, at most [`PRODUCT_SECTION_TITLE_MAX_CHARS`] characters.
+    ///
+    /// Required once the message carries more than one section — see
+    /// [`MultiProductMessage::validate`].
+    pub title: Option<String>,
+    /// Products in this section, 1..=[`PRODUCT_ITEMS_MAX`].
+    pub product_items: Vec<ProductItem>,
+}
+
+impl ProductSection {
+    /// A section without a title.
+    ///
+    /// ```
+    /// use meta_whatsapp::{ProductItem, ProductSection};
+    /// assert!(ProductSection::new(vec![ProductItem::new("sku")]).title.is_none());
+    /// ```
+    #[must_use]
+    pub fn new(items: Vec<ProductItem>) -> Self {
+        Self {
+            title: None,
+            product_items: items,
+        }
+    }
+
+    /// A section built from bare retailer ids.
+    ///
+    /// ```
+    /// use meta_whatsapp::ProductSection;
+    ///
+    /// let section = ProductSection::from_ids(["sku-a", "sku-b"]);
+    /// assert_eq!(section.product_items[1].product_retailer_id, "sku-b");
+    /// ```
+    #[must_use]
+    pub fn from_ids<I, S>(ids: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        Self {
+            title: None,
+            product_items: ids.into_iter().map(ProductItem::new).collect(),
+        }
+    }
+
+    /// Sets the section title.
+    ///
+    /// ```
+    /// use meta_whatsapp::{ProductItem, ProductSection};
+    ///
+    /// let section = ProductSection::new(vec![ProductItem::new("sku")]).title("Angebote");
+    /// assert_eq!(section.title.as_deref(), Some("Angebote"));
+    /// ```
+    #[must_use]
+    pub fn title(mut self, title: impl Into<String>) -> Self {
+        self.title = Some(title.into());
+        self
+    }
+
+    /// Appends one product.
+    ///
+    /// ```
+    /// use meta_whatsapp::{ProductItem, ProductSection};
+    ///
+    /// let section = ProductSection::new(Vec::new()).item(ProductItem::new("sku"));
+    /// assert_eq!(section.product_items.len(), 1);
+    /// ```
+    #[must_use]
+    pub fn item(mut self, item: ProductItem) -> Self {
+        self.product_items.push(item);
+        self
+    }
+
+    fn validate(&self) -> Result<()> {
+        if let Some(title) = &self.title {
+            require_non_empty("interactive.action.sections.title", title)?;
+            require_max_chars(
+                "interactive.action.sections.title",
+                title,
+                PRODUCT_SECTION_TITLE_MAX_CHARS,
+            )?;
+        }
+        if self.product_items.is_empty() || self.product_items.len() > PRODUCT_ITEMS_MAX {
+            return Err(Error::validation(
+                "interactive.action.sections.product_items",
+                format!("must contain 1..={PRODUCT_ITEMS_MAX} products"),
+            ));
+        }
+        for item in &self.product_items {
+            item.validate()?;
+        }
+        Ok(())
+    }
+
+    fn render(&self) -> Value {
+        let mut object = Map::new();
+        if let Some(title) = &self.title {
+            object.insert("title".into(), Value::String(title.clone()));
+        }
+        object.insert(
+            "product_items".into(),
+            Value::Array(self.product_items.iter().map(ProductItem::render).collect()),
+        );
+        Value::Object(object)
+    }
+}
+
+/// Single-product message (`interactive.type = "product"`): one product card
+/// from a catalog.
+///
+/// The contract defines no header for this message type, so the struct has no
+/// header field — the wire cannot be asked for one.
+///
+/// ```
+/// use meta_whatsapp::{MessageRequest, SingleProductMessage};
+///
+/// let json = MessageRequest::new(
+///     "1",
+///     SingleProductMessage::new("367025965434465", "sku-42").body("Nur heute 10 %"),
+/// )
+/// .to_json()?;
+/// assert_eq!(json["interactive"]["type"], "product");
+/// assert_eq!(json["interactive"]["action"]["catalog_id"], "367025965434465");
+/// assert_eq!(json["interactive"]["action"]["product_retailer_id"], "sku-42");
+/// assert_eq!(json["interactive"]["body"]["text"], "Nur heute 10 %");
+/// # Ok::<(), meta_whatsapp::Error>(())
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SingleProductMessage {
+    /// Catalog id linked to the `WhatsApp` Business Account.
+    pub catalog_id: String,
+    /// The product to show.
+    pub product_retailer_id: String,
+    /// Optional body line above the card, at most [`CAPTION_MAX_BYTES`] bytes.
+    pub body: Option<String>,
+    /// Optional footer, at most [`HEADER_MAX_CHARS`] characters.
+    pub footer: Option<String>,
+}
+
+impl SingleProductMessage {
+    /// A product message with no body and no footer.
+    ///
+    /// ```
+    /// use meta_whatsapp::SingleProductMessage;
+    ///
+    /// let message = SingleProductMessage::new("catalog", "sku");
+    /// assert!(message.body.is_none());
+    /// assert!(message.footer.is_none());
+    /// ```
+    pub fn new(catalog_id: impl Into<String>, product_retailer_id: impl Into<String>) -> Self {
+        Self {
+            catalog_id: catalog_id.into(),
+            product_retailer_id: product_retailer_id.into(),
+            body: None,
+            footer: None,
+        }
+    }
+
+    /// Adds the body line. Optional for this message type only.
+    ///
+    /// ```
+    /// use meta_whatsapp::SingleProductMessage;
+    ///
+    /// let message = SingleProductMessage::new("c", "s").body("Hallo");
+    /// assert_eq!(message.body.as_deref(), Some("Hallo"));
+    /// ```
+    #[must_use]
+    pub fn body(mut self, body: impl Into<String>) -> Self {
+        self.body = Some(body.into());
+        self
+    }
+
+    /// Adds a footer.
+    ///
+    /// ```
+    /// use meta_whatsapp::SingleProductMessage;
+    ///
+    /// let message = SingleProductMessage::new("c", "s").footer("Impressum");
+    /// assert_eq!(message.footer.as_deref(), Some("Impressum"));
+    /// ```
+    #[must_use]
+    pub fn footer(mut self, footer: impl Into<String>) -> Self {
+        self.footer = Some(footer.into());
+        self
+    }
+
+    /// Checks both ids and the optional text bounds.
+    ///
+    /// ```
+    /// use meta_whatsapp::SingleProductMessage;
+    ///
+    /// assert!(SingleProductMessage::new("c", "s").validate().is_ok());
+    /// assert!(SingleProductMessage::new("c", "").validate().is_err());
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] naming the first offending field.
+    pub fn validate(&self) -> Result<()> {
+        require_identifier("interactive.action.catalog_id", &self.catalog_id)?;
+        require_identifier(
+            "interactive.action.product_retailer_id",
+            &self.product_retailer_id,
+        )?;
+        if let Some(body) = &self.body {
+            require_non_empty("interactive.body.text", body)?;
+            require_max_bytes("interactive.body.text", body, CAPTION_MAX_BYTES)?;
+        }
+        if let Some(footer) = &self.footer {
+            require_max_chars("interactive.footer.text", footer, HEADER_MAX_CHARS)?;
+        }
+        Ok(())
+    }
+
+    fn render(&self) -> Value {
+        let mut interactive = Map::new();
+        interactive.insert("type".into(), Value::String("product".into()));
+        if let Some(body) = &self.body {
+            interactive.insert("body".into(), json!({ "text": body }));
+        }
+        if let Some(footer) = &self.footer {
+            interactive.insert("footer".into(), json!({ "text": footer }));
+        }
+        interactive.insert(
+            "action".into(),
+            json!({
+                "catalog_id": self.catalog_id,
+                "product_retailer_id": self.product_retailer_id,
+            }),
+        );
+        Value::Object(interactive)
+    }
+}
+
+/// Multi-product message (`interactive.type = "product_list"`): up to 30
+/// products in up to 10 sections.
+///
+/// Header and body are required for this type, so the constructor takes both.
+///
+/// ```
+/// use meta_whatsapp::{MessageRequest, MultiProductMessage, ProductSection};
+///
+/// let json = MessageRequest::new(
+///     "1",
+///     MultiProductMessage::new("146265584024623", "Unser Katalog", "Bitte wählen")
+///         .section(ProductSection::from_ids(["sku-a", "sku-b"]).title("Neu")),
+/// )
+/// .to_json()?;
+/// assert_eq!(json["interactive"]["type"], "product_list");
+/// assert_eq!(json["interactive"]["header"]["text"], "Unser Katalog");
+/// assert_eq!(
+///     json["interactive"]["action"]["sections"][0]["product_items"][1]["product_retailer_id"],
+///     "sku-b"
+/// );
+/// # Ok::<(), meta_whatsapp::Error>(())
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MultiProductMessage {
+    /// Text header, required by the contract (at most [`HEADER_MAX_CHARS`]).
+    pub header: HeaderText,
+    /// Body text, at most [`CAPTION_MAX_BYTES`] bytes.
+    pub body: String,
+    /// Optional footer, at most [`HEADER_MAX_CHARS`] characters.
+    pub footer: Option<String>,
+    /// Catalog id linked to the `WhatsApp` Business Account.
+    pub catalog_id: String,
+    /// 1..=[`PRODUCT_SECTIONS_MAX`] sections.
+    pub sections: Vec<ProductSection>,
+}
+
+impl MultiProductMessage {
+    /// A multi-product message with no sections yet.
+    ///
+    /// ```
+    /// use meta_whatsapp::MultiProductMessage;
+    ///
+    /// let message = MultiProductMessage::new("catalog", "Katalog", "Bitte wählen");
+    /// assert!(message.sections.is_empty());
+    /// ```
+    pub fn new(
+        catalog_id: impl Into<String>,
+        header: impl Into<String>,
+        body: impl Into<String>,
+    ) -> Self {
+        Self {
+            header: HeaderText::new(header),
+            body: body.into(),
+            footer: None,
+            catalog_id: catalog_id.into(),
+            sections: Vec::new(),
+        }
+    }
+
+    /// Appends a section.
+    ///
+    /// ```
+    /// use meta_whatsapp::{MultiProductMessage, ProductSection};
+    ///
+    /// let message = MultiProductMessage::new("c", "K", "B")
+    ///     .section(ProductSection::from_ids(["sku"]));
+    /// assert_eq!(message.sections.len(), 1);
+    /// ```
+    #[must_use]
+    pub fn section(mut self, section: ProductSection) -> Self {
+        self.sections.push(section);
+        self
+    }
+
+    /// Adds a footer.
+    ///
+    /// ```
+    /// use meta_whatsapp::MultiProductMessage;
+    ///
+    /// let message = MultiProductMessage::new("c", "K", "B").footer("Versand frei");
+    /// assert_eq!(message.footer.as_deref(), Some("Versand frei"));
+    /// ```
+    #[must_use]
+    pub fn footer(mut self, footer: impl Into<String>) -> Self {
+        self.footer = Some(footer.into());
+        self
+    }
+
+    /// Requires 1–10 sections, at most 30 products overall, a catalog id and
+    /// bounded text.
+    ///
+    /// ```
+    /// use meta_whatsapp::{MultiProductMessage, ProductSection};
+    ///
+    /// let ok = MultiProductMessage::new("catalog", "Katalog", "Bitte wählen")
+    ///     .section(ProductSection::from_ids(["sku"]));
+    /// assert!(ok.validate().is_ok());
+    ///
+    /// // A message without a section has nothing to show.
+    /// assert!(MultiProductMessage::new("catalog", "Katalog", "Bitte wählen")
+    ///     .validate()
+    ///     .is_err());
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an empty/oversized structure, a missing
+    /// section title when there is more than one section, or bad text.
+    pub fn validate(&self) -> Result<()> {
+        require_identifier("interactive.action.catalog_id", &self.catalog_id)?;
+        self.header.validate()?;
+        require_non_empty("interactive.body.text", &self.body)?;
+        require_max_bytes("interactive.body.text", &self.body, CAPTION_MAX_BYTES)?;
+        if let Some(footer) = &self.footer {
+            require_max_chars("interactive.footer.text", footer, HEADER_MAX_CHARS)?;
+        }
+        if self.sections.is_empty() || self.sections.len() > PRODUCT_SECTIONS_MAX {
+            return Err(Error::validation(
+                "interactive.action.sections",
+                format!("must contain 1..={PRODUCT_SECTIONS_MAX} sections"),
+            ));
+        }
+        // The spec asks for a title as soon as the message has more than one
+        // section; without it WhatsApp renders an unlabelled block.
+        let multiple = self.sections.len() > 1;
+        for section in &self.sections {
+            section.validate()?;
+            if multiple && section.title.is_none() {
+                return Err(Error::validation(
+                    "interactive.action.sections.title",
+                    "is required when the message has more than one section",
+                ));
+            }
+        }
+        let total: usize = self
+            .sections
+            .iter()
+            .map(|section| section.product_items.len())
+            .sum();
+        if total > PRODUCTS_MAX {
+            return Err(Error::validation(
+                "interactive.action.sections.product_items",
+                format!("must contain at most {PRODUCTS_MAX} products in total, got {total}"),
+            ));
+        }
+        Ok(())
+    }
+
+    fn render(&self) -> Value {
+        let mut interactive = Map::new();
+        interactive.insert("type".into(), Value::String("product_list".into()));
+        interactive.insert(
+            "header".into(),
+            json!({ "type": "text", "text": self.header.text }),
+        );
+        interactive.insert("body".into(), json!({ "text": self.body }));
+        if let Some(footer) = &self.footer {
+            interactive.insert("footer".into(), json!({ "text": footer }));
+        }
+        interactive.insert(
+            "action".into(),
+            json!({
+                "catalog_id": self.catalog_id,
+                "sections": self.sections.iter().map(ProductSection::render).collect::<Vec<_>>(),
+            }),
+        );
+        Value::Object(interactive)
+    }
+}
+
+impl From<SingleProductMessage> for MessageBody {
+    fn from(value: SingleProductMessage) -> Self {
+        Self::Interactive(InteractiveMessage::Product(value))
+    }
+}
+
+impl From<MultiProductMessage> for MessageBody {
+    fn from(value: MultiProductMessage) -> Self {
+        Self::Interactive(InteractiveMessage::ProductList(value))
+    }
+}
+
+/// Any interactive message: buttons, list, flow or a catalog product message.
 ///
 /// ```
 /// use meta_whatsapp::{InteractiveMessage, ListMessage, MessageRequest};
@@ -2451,10 +2963,15 @@ pub enum InteractiveMessage {
     List(ListMessage),
     /// `WhatsApp` Flow.
     Flow(FlowMessage),
+    /// One catalog product card.
+    Product(SingleProductMessage),
+    /// Up to 30 catalog products in up to 10 sections.
+    ProductList(MultiProductMessage),
 }
 
 impl InteractiveMessage {
-    /// Which interactive kind this is (`button`, `list`, `flow`).
+    /// Which interactive kind this is (`button`, `list`, `flow`, `product`,
+    /// `product_list`).
     ///
     /// ```
     /// use meta_whatsapp::{FlowAction, FlowMessage, InteractiveMessage};
@@ -2462,12 +2979,21 @@ impl InteractiveMessage {
     /// let flow = FlowMessage::new("f", "c", FlowAction::DataExchange);
     /// assert_eq!(InteractiveMessage::Flow(flow).kind(), "flow");
     /// ```
+    ///
+    /// ```
+    /// use meta_whatsapp::{InteractiveMessage, MultiProductMessage};
+    ///
+    /// let list = MultiProductMessage::new("catalog", "Katalog", "Bitte wählen");
+    /// assert_eq!(InteractiveMessage::ProductList(list).kind(), "product_list");
+    /// ```
     #[must_use]
     pub fn kind(&self) -> &'static str {
         match self {
             Self::Buttons(_) => "button",
             Self::List(_) => "list",
             Self::Flow(_) => "flow",
+            Self::Product(_) => "product",
+            Self::ProductList(_) => "product_list",
         }
     }
 
@@ -2491,6 +3017,8 @@ impl InteractiveMessage {
             Self::Buttons(message) => message.validate(),
             Self::List(message) => message.validate(),
             Self::Flow(message) => message.validate(),
+            Self::Product(message) => message.validate(),
+            Self::ProductList(message) => message.validate(),
         }
     }
 
@@ -2499,6 +3027,8 @@ impl InteractiveMessage {
             Self::Buttons(message) => message.render(),
             Self::List(message) => message.render(),
             Self::Flow(message) => message.render(),
+            Self::Product(message) => message.render(),
+            Self::ProductList(message) => message.render(),
         }
     }
 }
@@ -2518,6 +3048,18 @@ impl From<ListMessage> for InteractiveMessage {
 impl From<FlowMessage> for InteractiveMessage {
     fn from(value: FlowMessage) -> Self {
         Self::Flow(value)
+    }
+}
+
+impl From<SingleProductMessage> for InteractiveMessage {
+    fn from(value: SingleProductMessage) -> Self {
+        Self::Product(value)
+    }
+}
+
+impl From<MultiProductMessage> for InteractiveMessage {
+    fn from(value: MultiProductMessage) -> Self {
+        Self::ProductList(value)
     }
 }
 
@@ -2546,6 +3088,13 @@ fn require_non_empty(field: &'static str, value: &str) -> Result<()> {
         return Err(Error::validation(field, "must not be empty"));
     }
     Ok(())
+}
+
+/// A catalog id or retailer id: present and printable, no length rule because
+/// neither the spec nor the reference pins one.
+fn require_identifier(field: &'static str, value: &str) -> Result<()> {
+    require_non_empty(field, value)?;
+    require_no_controls(field, value)
 }
 
 fn require_max_bytes(field: &'static str, value: &str, max: usize) -> Result<()> {
