@@ -10,6 +10,18 @@ of the README.
 ## [Unreleased]
 
 ### Added
+- Typed inbound flow replies. `InteractiveReply::nfm_reply` was an untyped
+  `serde_json::Value`; it is now a `FlowReply` (`name`, `body`, `response_json`,
+  plus `extra` for members Meta adds later) reachable through
+  `Message::flow_reply()`. The flow's answers arrive JSON-encoded in a string,
+  so `FlowReply::response()` decodes them into a `FlowResponse` with
+  `flow_token()`, `get()` and `field()`; a missing or malformed
+  `response_json` is `Error::Payload` and the raw string stays on the struct.
+  Breaking for anyone who read the untyped object. Closes #8.
+- `FlowAction::navigate_with_data` and a validation for
+  `flow_action_payload.data`: a non-object payload is now `Error::Validation`
+  instead of being rendered and sent. Closes #8 together with the typed reply
+  above.
 - Catalog product messages (#19): `SingleProductMessage` (`interactive.type`
   `product`) and `MultiProductMessage` (`product_list`) with `ProductSection` and
   `ProductItem`, plus the matching `InteractiveMessage::Product` /

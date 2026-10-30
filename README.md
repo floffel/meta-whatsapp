@@ -293,9 +293,12 @@ this section when its issue closes.
   `catalog_message` action (`{name: "catalog_message"}` with a thumbnail product)
   is not implemented either: it is a catalog-level "view catalog" entry point,
   not a product card, and belongs to its own issue.
-* **Flow data-exchange endpoints** — issue #8. Until then the inbound
-  `nfm_reply` payload is passed through raw (`InteractiveReply::nfm_reply`);
-  decrypting and serving flows is a server concern, not a client one.
+* **Flow API beyond the message pair** — issue #26: asset upload, the
+  data-exchange encryption endpoints and the flow preview/get endpoints. The
+  message pair itself is complete: outbound `FlowMessage`, and inbound typed
+  `FlowReply` whose `response_json` decodes through `FlowReply::response` into
+  a `FlowResponse` (`flow_token`, `get`, `field`). Decrypting and serving flows
+  stays a server concern, not a client one.
 * **App-level webhook field subscription** (`/{app_id}/subscriptions`) and
   registering the callback URL itself — issue #9.
 * **WABA-level phone-number listing / onboarding** (`GET|POST /{waba_id}/phone_numbers`,

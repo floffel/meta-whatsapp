@@ -413,6 +413,32 @@ impl Message {
     pub fn timestamp_secs(&self) -> Option<u64> {
         self.timestamp.trim().parse().ok()
     }
+
+    /// The flow completion reply, when this message answers a Flow
+    /// (`interactive.type == "nfm_reply"`).
+    ///
+    /// ```
+    /// use meta_whatsapp::Message;
+    ///
+    /// let message: Message = serde_json::from_str(
+    ///     r#"{"id":"1","from":"2","type":"interactive","interactive":{
+    ///         "type":"nfm_reply","nfm_reply":{"name":"flow","body":"Sent",
+    ///         "response_json":"{\"flow_token\":\"tok\"}"}}}"#,
+    /// )?;
+    /// assert_eq!(message.flow_reply().unwrap().response()?.flow_token(), Some("tok"));
+    ///
+    /// let plain: Message = serde_json::from_str(
+    ///     r#"{"id":"1","from":"2","type":"text","text":{"body":"hi"}}"#,
+    /// )?;
+    /// assert!(plain.flow_reply().is_none());
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    #[must_use]
+    pub fn flow_reply(&self) -> Option<&FlowReply> {
+        self.interactive
+            .as_ref()
+            .and_then(|interactive| interactive.nfm_reply.as_ref())
+    }
 }
 
 /// Text body of a text message.
@@ -556,6 +582,182 @@ pub struct Reaction {
     pub emoji: Option<String>,
 }
 
+/// The `nfm_reply` block Meta sends when a customer completes a Flow.
+///
+/// The wire shape is small and slightly surprising: the flow's answers are not
+/// inline, they arrive in `response_json` as a **JSON document encoded in a
+/// string**, and `flow_token` lives inside that document — there is no
+/// top-level token field. `name` is the payload type (Meta sends `"flow"`),
+/// `body` is the text shown in the chat.
+///
+/// Source: `https://developers.facebook.com/docs/whatsapp/flows/reference/flowswebhooks/`
+/// documents `interactive.nfm_reply.name`, `.body` and `.response_json`, all
+/// three as strings.
+///
+/// ```
+/// use meta_whatsapp::types::FlowReply;
+///
+/// let reply: FlowReply = serde_json::from_str(
+///     r#"{"name":"flow","body":"Sent",
+///         "response_json":"{\"flow_token\":\"abc\",\"city\":\"Berlin\"}"}"#,
+/// )?;
+/// assert_eq!(reply.name.as_deref(), Some("flow"));
+/// assert_eq!(reply.body.as_deref(), Some("Sent"));
+/// let response = reply.response()?;
+/// assert_eq!(response.flow_token(), Some("abc"));
+/// assert_eq!(response.field("city"), Some("Berlin"));
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct FlowReply {
+    /// The flow's answers, JSON-encoded in a string exactly as Meta sends them.
+    #[serde(default, alias = "responseJson")]
+    pub response_json: Option<String>,
+    /// Payload type; Meta sends `"flow"`.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Text Meta shows in the chat (`"Sent"` for a completed flow).
+    #[serde(default)]
+    pub body: Option<String>,
+    /// Keys this crate does not model, kept verbatim.
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+impl FlowReply {
+    /// Decodes `response_json` into a [`FlowResponse`].
+    ///
+    /// ```
+    /// use meta_whatsapp::types::FlowReply;
+    ///
+    /// let reply = FlowReply {
+    ///     response_json: Some(r#"{"flow_token":"t"}"#.to_string()),
+    ///     ..FlowReply::default()
+    /// };
+    /// assert_eq!(reply.response()?.flow_token(), Some("t"));
+    /// # Ok::<(), meta_whatsapp::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`crate::Error::Payload`] when `response_json` is absent or is not valid JSON.
+    /// The raw string stays on the struct, so a caller can log what arrived.
+    pub fn response(&self) -> crate::error::Result<FlowResponse> {
+        let raw = self.response_json.as_deref().ok_or_else(|| {
+            crate::error::Error::Payload("nfm_reply.response_json is missing".to_string())
+        })?;
+        let value: Value = serde_json::from_str(raw).map_err(|error| {
+            crate::error::Error::Payload(format!(
+                "nfm_reply.response_json is not valid JSON: {error}"
+            ))
+        })?;
+        Ok(FlowResponse { value })
+    }
+}
+
+/// The decoded `nfm_reply.response_json` document.
+///
+/// Keys are the ones the flow itself defines (screen and component ids, plus
+/// `flow_token`), so nothing here is typed field by field: [`FlowResponse::get`]
+/// returns the raw value, [`FlowResponse::field`] the string-valued ones.
+///
+/// ```
+/// use meta_whatsapp::types::FlowReply;
+///
+/// let reply: FlowReply = serde_json::from_str(
+///     r#"{"response_json":"{\"flow_token\":\"t\",\"screen_0_Name\":\"Ada\",\"items\":[1,2]}"}"#,
+/// )?;
+/// let response = reply.response()?;
+/// assert_eq!(response.field("screen_0_Name"), Some("Ada"));
+/// assert_eq!(response.get("items"), Some(&serde_json::json!([1, 2])));
+/// assert_eq!(response.get("missing"), None);
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FlowResponse {
+    value: Value,
+}
+
+impl FlowResponse {
+    /// The decoded document, whatever JSON type it turned out to be.
+    ///
+    /// ```
+    /// use meta_whatsapp::types::FlowReply;
+    ///
+    /// let reply = FlowReply {
+    ///     response_json: Some(r#"{"a":1}"#.to_string()),
+    ///     ..FlowReply::default()
+    /// };
+    /// assert_eq!(reply.response()?.as_value(), &serde_json::json!({"a": 1}));
+    /// # Ok::<(), meta_whatsapp::Error>(())
+    /// ```
+    #[must_use]
+    pub fn as_value(&self) -> &Value {
+        &self.value
+    }
+
+    /// The `flow_token` the flow echoed back, when it sent one.
+    ///
+    /// ```
+    /// use meta_whatsapp::types::FlowReply;
+    ///
+    /// let reply = FlowReply {
+    ///     response_json: Some(r#"{"flow_token":"tok"}"#.to_string()),
+    ///     ..FlowReply::default()
+    /// };
+    /// assert_eq!(reply.response()?.flow_token(), Some("tok"));
+    ///
+    /// let without = FlowReply {
+    ///     response_json: Some("{}".to_string()),
+    ///     ..FlowReply::default()
+    /// };
+    /// assert_eq!(without.response()?.flow_token(), None);
+    /// # Ok::<(), meta_whatsapp::Error>(())
+    /// ```
+    #[must_use]
+    pub fn flow_token(&self) -> Option<&str> {
+        self.field("flow_token")
+    }
+
+    /// Raw value of a key the flow defined, `None` when absent or when the
+    /// document is not an object.
+    ///
+    /// ```
+    /// use meta_whatsapp::types::FlowReply;
+    ///
+    /// let reply = FlowReply {
+    ///     response_json: Some(r#"{"qty":3}"#.to_string()),
+    ///     ..FlowReply::default()
+    /// };
+    /// assert_eq!(reply.response()?.get("qty"), Some(&serde_json::json!(3)));
+    /// # Ok::<(), meta_whatsapp::Error>(())
+    /// ```
+    #[must_use]
+    pub fn get(&self, name: &str) -> Option<&Value> {
+        self.value.as_object()?.get(name)
+    }
+
+    /// String value of a key the flow defined; non-string values and missing
+    /// keys both answer `None`, use [`FlowResponse::get`] to see the raw value.
+    ///
+    /// ```
+    /// use meta_whatsapp::types::FlowReply;
+    ///
+    /// let reply = FlowReply {
+    ///     response_json: Some(r#"{"city":"Berlin","n":1}"#.to_string()),
+    ///     ..FlowReply::default()
+    /// };
+    /// let response = reply.response()?;
+    /// assert_eq!(response.field("city"), Some("Berlin"));
+    /// assert_eq!(response.field("n"), None);
+    /// # Ok::<(), meta_whatsapp::Error>(())
+    /// ```
+    #[must_use]
+    pub fn field(&self, name: &str) -> Option<&str> {
+        self.get(name)?.as_str()
+    }
+}
+
 /// Reply to an interactive message.
 ///
 /// ```
@@ -578,9 +780,9 @@ pub struct InteractiveReply {
     /// List selection.
     #[serde(default)]
     pub list_reply: Option<ReplyRef>,
-    /// Flow response payload.
+    /// Flow completion reply (`type == "nfm_reply"`).
     #[serde(default)]
-    pub nfm_reply: Option<Value>,
+    pub nfm_reply: Option<FlowReply>,
 }
 
 /// The id/title pair echoed for a button or list selection.

@@ -130,6 +130,8 @@ pub use template::{
 #[cfg(feature = "http")]
 pub use transport::ReqwestTransport;
 pub use transport::Transport;
-pub use types::{Change, ChangeValue, Entry, Message, Status, WebhookPayload};
+pub use types::{
+    Change, ChangeValue, Entry, FlowReply, FlowResponse, Message, Status, WebhookPayload,
+};
 pub use usage::{BusinessUseCaseUsage, UseCaseUsage};
 pub use webhook::WebhookVerifier;

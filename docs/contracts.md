@@ -63,6 +63,7 @@ Secondary sources — the developer reference pages the spec links to:
 | `BusinessUseCaseUsage` / `UseCaseUsage` | header `x-business-use-case-usage` | Header value is a JSON object keyed by business id, each value an array of `{type, call_count, total_cputime, total_time, estimated_time_to_regain_access}`. |
 | `SingleProductMessage` | `Interactive` with `type: product`, `ActionObject` variant `{catalog_id, product_retailer_id}` | `HeaderObject` says a header "cannot be set for 'product' type", so the struct has none. `BodyObject` is "optional for 'product' type"; footer optional. Body 1024, footer 60. |
 | `MultiProductMessage` / `ProductSection` / `ProductItem` | `Interactive` with `type: product_list`, `ActionObject` variant `{catalog_id, sections}`, `SectionObject.product_items` | Header "required for 'product_list'", body "required for other interactive message types" — both are constructor arguments. `sections` 1–10, `product_items` 1–30 per section, section `title` max 24 and required once there is more than one section, header/footer 60, body 1024. Meta's reference caps the whole message at 30 products, so that cap applies on top of the per-section one. |
+| `FlowReply` / `FlowResponse` | not present in the v23 OpenAPI file | Shape comes from the flows-webhooks reference, `https://developers.facebook.com/docs/whatsapp/flows/reference/flowswebhooks/`: `interactive.type = "nfm_reply"`, and `interactive.nfm_reply` carries exactly three documented strings — `name`, `body`, `response_json`. The flow's answers, `flow_token` included, are *inside* `response_json` as a JSON document encoded in a string; there is no top-level token field. Decoding is fallible (`Error::Payload`) and the raw string is kept on the struct. |
 
 ## Deliberate divergences
 
@@ -91,3 +92,8 @@ Secondary sources — the developer reference pages the spec links to:
   way and a client-side error names the field.
 * **Catalog and retailer ids are not length-capped.** Neither source gives a
   maximum, so only emptiness and control characters are refused.
+* **`flow_message_version` is fixed at the documented `"3"`.** The issue that
+  requested `FlowMessage` listed the version as a settable field; it is instead
+  emitted as the value Meta's own examples use, because a caller-chosen version
+  can only be wrong on the wire. Nothing in the docs shows another supported
+  value, so making it an option would invent a knob.
