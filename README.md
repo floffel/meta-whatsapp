@@ -112,10 +112,21 @@ validates before rendering, so an invalid message never reaches the network.
 | contacts | `ContactsMessage` + `ContactCard` | name, phones, e-mails, org, URLs, birthday |
 | reaction | `ReactionMessage` | empty emoji removes a reaction |
 | interactive | `ButtonMessage`, `ListMessage`, `FlowMessage` | 1–3 buttons, 1–10 list rows, flows |
+| catalog products | `SingleProductMessage`, `MultiProductMessage` + `ProductSection` | one product card, or up to 30 products in up to 10 sections |
 | template | `TemplateMessage` | text/currency/date-time/media parameters, header/body/button merges |
 
 Envelope-level features: reply context (`context.message_id`),
 `biz_opaque_callback_data`, and `recipient_type`.
+
+Catalog product messages (`interactive.type` `product` and `product_list`) need a
+catalog linked to the WhatsApp Business Account. The wire pins the shapes
+unevenly, so the types follow it: `product_list` requires a text header and a
+body — both are constructor arguments of `MultiProductMessage` — while `product`
+forbids a header and allows the body to be omitted, so `SingleProductMessage`
+has no header field at all and an optional `body`. A multi-product message takes
+1–10 sections; every section needs a title once there is more than one, carries
+1–30 products, and the message holds at most 30 products in total. Section titles
+are 24 characters, header and footer 60, the body 1024 bytes.
 
 ## Media
 
@@ -263,6 +274,10 @@ to need a patch release — `docs/contracts.md` records the sources:
 * **`backup{password,data}` on register.** The migration blob for an on-premises
   Business API move; the OpenAPI description does not pin the shape down, so both
   parts are opaque strings here and the caller supplies whatever its export produced.
+* **Catalog ids and retailer ids.** The spec types both as plain strings and gives
+  no maximum length, so neither is capped; they are checked for emptiness and
+  control characters only. Whether an id exists in the catalog is Meta's answer,
+  not ours.
 
 ## Tracked gaps
 
@@ -270,9 +285,14 @@ A Cloud API surface this crate does not implement is an issue, not an exclusion.
 The list below is the shortcut; the issue is the contract, and an entry leaves
 this section when its issue closes.
 
-* **Catalog / product / order / address messages** — issue #7. Commerce
-  payloads with their own schema churn; `MessageBody` stays `#[non_exhaustive]`
-  so they can land without a breaking release.
+* **Catalog product messages are covered** (`SingleProductMessage`,
+  `MultiProductMessage`, issue #19). What is still open from issue #7 are the
+  **order and address messages** (`interactive.type` `order_details`,
+  `address_message`), which carry their own schema churn; `MessageBody` stays
+  `#[non_exhaustive]` so they can land without a breaking release. The
+  `catalog_message` action (`{name: "catalog_message"}` with a thumbnail product)
+  is not implemented either: it is a catalog-level "view catalog" entry point,
+  not a product card, and belongs to its own issue.
 * **Flow data-exchange endpoints** — issue #8. Until then the inbound
   `nfm_reply` payload is passed through raw (`InteractiveReply::nfm_reply`);
   decrypting and serving flows is a server concern, not a client one.

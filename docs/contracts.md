@@ -61,6 +61,8 @@ Secondary sources — the developer reference pages the spec links to:
 | `WebhookSubscriptions` / `SubscribedApp` | `SubscribedAppsResponse`, `SubscribedApp` | Each entry may wrap the app in `whatsapp_business_api_data` (spec example) — both parse. |
 | `SubscriptionConfig` | `SubscriptionRequest` | `override_callback_uri`, `verify_token`. |
 | `BusinessUseCaseUsage` / `UseCaseUsage` | header `x-business-use-case-usage` | Header value is a JSON object keyed by business id, each value an array of `{type, call_count, total_cputime, total_time, estimated_time_to_regain_access}`. |
+| `SingleProductMessage` | `Interactive` with `type: product`, `ActionObject` variant `{catalog_id, product_retailer_id}` | `HeaderObject` says a header "cannot be set for 'product' type", so the struct has none. `BodyObject` is "optional for 'product' type"; footer optional. Body 1024, footer 60. |
+| `MultiProductMessage` / `ProductSection` / `ProductItem` | `Interactive` with `type: product_list`, `ActionObject` variant `{catalog_id, sections}`, `SectionObject.product_items` | Header "required for 'product_list'", body "required for other interactive message types" — both are constructor arguments. `sections` 1–10, `product_items` 1–30 per section, section `title` max 24 and required once there is more than one section, header/footer 60, body 1024. Meta's reference caps the whole message at 30 products, so that cap applies on top of the per-section one. |
 
 ## Deliberate divergences
 
@@ -77,3 +79,15 @@ Secondary sources — the developer reference pages the spec links to:
 * **No field-level webhook subscription.** The WABA node has no
   `subscribed_fields`; that parameter belongs to the app-level
   `/{app_id}/subscriptions` endpoint, which is out of scope (README).
+* **Required catalog fields live in the constructor.** For `product_list` the
+  spec makes `header` and `body` mandatory and for `product` it forbids the
+  header; `MultiProductMessage::new` therefore takes header and body, and
+  `SingleProductMessage` has no header field. A shape the wire rejects cannot be
+  built, so no runtime check has to remember it.
+* **Two documented caps the spec omits are enforced.** The `SectionObject` caps
+  `product_items` at 30 *per section*; Meta's reference caps a multi-product
+  message at 30 products overall, and requires a `title` as soon as there is more
+  than one section. Both are checked, because Meta rejects the payload either
+  way and a client-side error names the field.
+* **Catalog and retailer ids are not length-capped.** Neither source gives a
+  maximum, so only emptiness and control characters are refused.
