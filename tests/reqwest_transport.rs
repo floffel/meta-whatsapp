@@ -267,7 +267,7 @@ async fn an_empty_body_at_a_zero_ceiling_is_accepted() {
         .execute(Request::get(&format!("{base}/messages"), "t"))
         .await
         .unwrap();
-    assert!(response.body().is_empty());
+    assert_eq!(response.body(), b"");
 }
 
 #[tokio::test]
