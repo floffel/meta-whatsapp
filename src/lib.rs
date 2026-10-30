@@ -8,9 +8,10 @@
 //!   events, and unknown future events).
 //! * [`client`] — send every message family (text, media, location, contacts,
 //!   reaction, interactive buttons/list/flow/catalog products, templates),
-//!   upload/download/delete media, list templates, and administer the account
-//!   (business profile, phone-number quality and limits, register/deregister
-//!   and the two-step verification PIN, blocklist, webhook subscriptions).
+//!   upload/download/delete media, list, create, edit and delete templates, and
+//!   administer the account (business profile, phone-number quality and limits,
+//!   register/deregister and the two-step verification PIN, blocklist, webhook
+//!   subscriptions).
 //! * [`business`], [`subscription`], [`usage`] — the typed shapes behind that
 //!   administration surface, including Meta's `X-Business-Use-Case-Usage`
 //!   budget header.
@@ -124,8 +125,11 @@ pub use subscription::{
     SubscribedApp, SubscriptionConfig, SubscriptionState, WebhookSubscriptions,
 };
 pub use template::{
-    Cursors, Paging, TemplateButtonType, TemplateComponent, TemplateLanguage, TemplateList,
-    TemplateMediaKind, TemplateMessage, TemplateParameter, TemplateQuery, TemplateSummary,
+    Cursors, Paging, TemplateAck, TemplateButton, TemplateButtonType, TemplateCategory,
+    TemplateComponent, TemplateDefinition, TemplateDefinitionComponent, TemplateDeleteAck,
+    TemplateHeaderFormat, TemplateLanguage, TemplateList, TemplateMediaKind, TemplateMessage,
+    TemplateOtpType, TemplateParameter, TemplateParameterFormat, TemplateQuery, TemplateSummary,
+    TemplateUpdate,
 };
 #[cfg(feature = "http")]
 pub use transport::ReqwestTransport;

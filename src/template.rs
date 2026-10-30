@@ -1,8 +1,10 @@
-//! Template messages (send) and template listing (read).
+//! Template messages, listing and management.
 //!
 //! Templates are pre-approved by Meta. Sending one references its name and
 //! language plus the positional parameters for the header, body and buttons;
 //! listing them reads `/{waba_id}/message_templates` with cursor paging.
+//! [`TemplateDefinition`] and [`TemplateUpdate`] build the definition Meta
+//! reviews, for `create_template`, `update_template` and `delete_template`.
 //!
 //! ```
 //! use meta_whatsapp::{MessageRequest, TemplateMessage};
@@ -28,6 +30,171 @@ use serde_json::{json, Map, Value};
 
 use crate::error::{Error, Result};
 use crate::media::MediaRef;
+use crate::message::{require_max_bytes, require_max_chars, require_non_empty};
+
+/// Maximum UTF-8 byte length of a template name.
+///
+/// ```
+/// use meta_whatsapp::template::TEMPLATE_NAME_MAX_BYTES;
+/// assert_eq!(TEMPLATE_NAME_MAX_BYTES, 512);
+/// ```
+pub const TEMPLATE_NAME_MAX_BYTES: usize = 512;
+
+/// Maximum character length of a template language code.
+///
+/// ```
+/// use meta_whatsapp::template::TEMPLATE_LANGUAGE_MAX_CHARS;
+/// assert_eq!(TEMPLATE_LANGUAGE_MAX_CHARS, 32);
+/// ```
+pub const TEMPLATE_LANGUAGE_MAX_CHARS: usize = 32;
+
+/// Maximum UTF-8 byte length of a template parameter example.
+///
+/// ```
+/// use meta_whatsapp::template::TEMPLATE_PARAMETER_MAX_BYTES;
+/// assert_eq!(TEMPLATE_PARAMETER_MAX_BYTES, 1024);
+/// ```
+pub const TEMPLATE_PARAMETER_MAX_BYTES: usize = 1024;
+
+/// Maximum character length of a text header definition.
+///
+/// ```
+/// use meta_whatsapp::template::TEMPLATE_HEADER_MAX_CHARS;
+/// assert_eq!(TEMPLATE_HEADER_MAX_CHARS, 60);
+/// ```
+pub const TEMPLATE_HEADER_MAX_CHARS: usize = 60;
+
+/// Maximum UTF-8 byte length of a body definition.
+///
+/// ```
+/// use meta_whatsapp::template::TEMPLATE_BODY_MAX_BYTES;
+/// assert_eq!(TEMPLATE_BODY_MAX_BYTES, 1024);
+/// ```
+pub const TEMPLATE_BODY_MAX_BYTES: usize = 1024;
+
+/// Maximum character length of a footer definition.
+///
+/// ```
+/// use meta_whatsapp::template::TEMPLATE_FOOTER_MAX_CHARS;
+/// assert_eq!(TEMPLATE_FOOTER_MAX_CHARS, 60);
+/// ```
+pub const TEMPLATE_FOOTER_MAX_CHARS: usize = 60;
+
+/// Maximum character length of a template button label.
+///
+/// ```
+/// use meta_whatsapp::template::TEMPLATE_BUTTON_TEXT_MAX_CHARS;
+/// assert_eq!(TEMPLATE_BUTTON_TEXT_MAX_CHARS, 25);
+/// ```
+pub const TEMPLATE_BUTTON_TEXT_MAX_CHARS: usize = 25;
+
+/// Maximum character length of a URL button's destination.
+///
+/// ```
+/// use meta_whatsapp::template::TEMPLATE_BUTTON_URL_MAX_CHARS;
+/// assert_eq!(TEMPLATE_BUTTON_URL_MAX_CHARS, 2000);
+/// ```
+pub const TEMPLATE_BUTTON_URL_MAX_CHARS: usize = 2000;
+
+/// Maximum character length of a copy-code button example.
+///
+/// ```
+/// use meta_whatsapp::template::TEMPLATE_BUTTON_EXAMPLE_MAX_CHARS;
+/// assert_eq!(TEMPLATE_BUTTON_EXAMPLE_MAX_CHARS, 15);
+/// ```
+pub const TEMPLATE_BUTTON_EXAMPLE_MAX_CHARS: usize = 15;
+
+/// Maximum number of buttons in a template.
+///
+/// ```
+/// use meta_whatsapp::template::TEMPLATE_BUTTONS_MAX;
+/// assert_eq!(TEMPLATE_BUTTONS_MAX, 10);
+/// ```
+pub const TEMPLATE_BUTTONS_MAX: usize = 10;
+
+/// Maximum number of URL buttons in a template.
+///
+/// ```
+/// use meta_whatsapp::template::TEMPLATE_URL_BUTTONS_MAX;
+/// assert_eq!(TEMPLATE_URL_BUTTONS_MAX, 2);
+/// ```
+pub const TEMPLATE_URL_BUTTONS_MAX: usize = 2;
+
+/// Maximum number of copy-code buttons in a template.
+///
+/// ```
+/// use meta_whatsapp::template::TEMPLATE_COPY_CODE_BUTTONS_MAX;
+/// assert_eq!(TEMPLATE_COPY_CODE_BUTTONS_MAX, 1);
+/// ```
+pub const TEMPLATE_COPY_CODE_BUTTONS_MAX: usize = 1;
+
+/// Maximum number of example parameters in one component.
+///
+/// ```
+/// use meta_whatsapp::template::TEMPLATE_EXAMPLES_MAX;
+/// assert_eq!(TEMPLATE_EXAMPLES_MAX, 20);
+/// ```
+pub const TEMPLATE_EXAMPLES_MAX: usize = 20;
+
+/// Maximum number of component groups in a template definition.
+///
+/// ```
+/// use meta_whatsapp::template::TEMPLATE_COMPONENTS_MAX;
+/// assert_eq!(TEMPLATE_COMPONENTS_MAX, 4);
+/// ```
+pub const TEMPLATE_COMPONENTS_MAX: usize = 4;
+
+/// Maximum number of digits in a template id.
+///
+/// ```
+/// use meta_whatsapp::template::TEMPLATE_ID_MAX_DIGITS;
+/// assert_eq!(TEMPLATE_ID_MAX_DIGITS, 32);
+/// ```
+pub const TEMPLATE_ID_MAX_DIGITS: usize = 32;
+
+/// Maximum authentication-code lifetime Meta accepts in a template footer.
+///
+/// ```
+/// use meta_whatsapp::template::TEMPLATE_CODE_EXPIRATION_MINUTES_MAX;
+/// assert_eq!(TEMPLATE_CODE_EXPIRATION_MINUTES_MAX, 90);
+/// ```
+pub const TEMPLATE_CODE_EXPIRATION_MINUTES_MAX: u16 = 90;
+
+/// Category assigned to a template definition.
+///
+/// ```
+/// use meta_whatsapp::TemplateCategory;
+///
+/// assert_eq!(TemplateCategory::Utility.as_str(), "UTILITY");
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
+pub enum TemplateCategory {
+    /// Promotional content.
+    #[default]
+    Marketing,
+    /// Transactional content.
+    Utility,
+    /// One-time authentication codes.
+    Authentication,
+}
+
+impl TemplateCategory {
+    /// Upper-case wire representation.
+    ///
+    /// ```
+    /// use meta_whatsapp::TemplateCategory;
+    /// assert_eq!(TemplateCategory::Authentication.as_str(), "AUTHENTICATION");
+    /// ```
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Marketing => "MARKETING",
+            Self::Utility => "UTILITY",
+            Self::Authentication => "AUTHENTICATION",
+        }
+    }
+}
 
 /// Language block of a template: `code` plus optional `policy`.
 ///
@@ -81,10 +248,10 @@ impl TemplateLanguage {
             ));
         }
         let count = self.code.chars().count();
-        if count > 32 {
+        if count > TEMPLATE_LANGUAGE_MAX_CHARS {
             return Err(Error::validation(
                 "template.language.code",
-                format!("must be at most 32 characters, got {count}"),
+                format!("must be at most {TEMPLATE_LANGUAGE_MAX_CHARS} characters, got {count}"),
             ));
         }
         if !self
@@ -257,7 +424,11 @@ impl TemplateParameter {
                         "must not be empty",
                     ));
                 }
-                require_max_bytes("template.parameters.text", text, 1024)
+                require_max_bytes(
+                    "template.parameters.text",
+                    text,
+                    TEMPLATE_PARAMETER_MAX_BYTES,
+                )
             }
             Self::Currency {
                 fallback_value,
@@ -675,10 +846,7 @@ impl TemplateMessage {
     /// [`Error::Validation`] for an empty name, bad language code or bad
     /// parameter.
     pub fn validate(&self) -> Result<()> {
-        if self.name.is_empty() {
-            return Err(Error::validation("template.name", "must not be empty"));
-        }
-        require_max_bytes("template.name", &self.name, 512)?;
+        validate_template_name(&self.name)?;
         self.language.validate()?;
         if self.components.len() > 3 {
             return Err(Error::validation(
@@ -915,17 +1083,14 @@ impl TemplateQuery {
             ("language", &self.language),
         ] {
             if let Some(value) = value {
-                parts.push(format!(
-                    "{key}={}",
-                    utf8_percent_encode(value, QUERY_VALUE_SET)
-                ));
+                parts.push(format!("{key}={}", encode_query_value(value)));
             }
         }
         if !self.fields.is_empty() {
             let fields = self
                 .fields
                 .iter()
-                .map(|field| utf8_percent_encode(field, QUERY_VALUE_SET).to_string())
+                .map(|field| encode_query_value(field))
                 .collect::<Vec<_>>()
                 .join("%2C");
             parts.push(format!("fields={fields}"));
@@ -1049,6 +1214,1840 @@ pub struct TemplateSummary {
     pub components: Vec<Value>,
 }
 
+/// Parameter naming style of a template definition.
+///
+/// ```
+/// use meta_whatsapp::template::TemplateParameterFormat;
+///
+/// assert_eq!(TemplateParameterFormat::default().as_str(), "POSITIONAL");
+/// assert_eq!(TemplateParameterFormat::Named.as_str(), "NAMED");
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
+pub enum TemplateParameterFormat {
+    /// `{{1}}`, `{{2}}` — Meta's default.
+    #[default]
+    Positional,
+    /// `{{order_id}}`: the placeholder names stand in the component text.
+    Named,
+}
+
+impl TemplateParameterFormat {
+    /// Upper-case wire representation.
+    ///
+    /// ```
+    /// use meta_whatsapp::template::TemplateParameterFormat;
+    /// assert_eq!(TemplateParameterFormat::Positional.as_str(), "POSITIONAL");
+    /// ```
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Positional => "POSITIONAL",
+            Self::Named => "NAMED",
+        }
+    }
+}
+
+/// Header format of a template definition.
+///
+/// The three media formats are the send-side [`TemplateMediaKind`] in Meta's
+/// upper-case spelling: [`TemplateHeaderFormat::from`] converts a media kind and
+/// [`TemplateHeaderFormat::media_kind`] converts back.
+///
+/// ```
+/// use meta_whatsapp::template::{TemplateHeaderFormat, TemplateMediaKind};
+///
+/// assert_eq!(TemplateHeaderFormat::Text.as_str(), "TEXT");
+/// assert_eq!(TemplateHeaderFormat::from(TemplateMediaKind::Video).as_str(), "VIDEO");
+/// assert_eq!(TemplateHeaderFormat::Location.media_kind(), None);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
+pub enum TemplateHeaderFormat {
+    /// Text, optionally with placeholders.
+    #[default]
+    Text,
+    /// Image; needs a handle in `example.header_handle`.
+    Image,
+    /// Video; needs a handle in `example.header_handle`.
+    Video,
+    /// Document; needs a handle in `example.header_handle`.
+    Document,
+    /// Location pin; carries neither text nor example.
+    Location,
+}
+
+impl TemplateHeaderFormat {
+    /// Upper-case wire representation.
+    ///
+    /// ```
+    /// use meta_whatsapp::template::TemplateHeaderFormat;
+    /// assert_eq!(TemplateHeaderFormat::Location.as_str(), "LOCATION");
+    /// ```
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Text => "TEXT",
+            Self::Image => "IMAGE",
+            Self::Video => "VIDEO",
+            Self::Document => "DOCUMENT",
+            Self::Location => "LOCATION",
+        }
+    }
+
+    /// The send-side media kind, for a media format.
+    ///
+    /// ```
+    /// use meta_whatsapp::template::{TemplateHeaderFormat, TemplateMediaKind};
+    ///
+    /// assert_eq!(
+    ///     TemplateHeaderFormat::Document.media_kind(),
+    ///     Some(TemplateMediaKind::Document)
+    /// );
+    /// assert_eq!(TemplateHeaderFormat::Text.media_kind(), None);
+    /// ```
+    #[must_use]
+    pub fn media_kind(self) -> Option<TemplateMediaKind> {
+        match self {
+            Self::Image => Some(TemplateMediaKind::Image),
+            Self::Video => Some(TemplateMediaKind::Video),
+            Self::Document => Some(TemplateMediaKind::Document),
+            Self::Text | Self::Location => None,
+        }
+    }
+}
+
+impl From<TemplateMediaKind> for TemplateHeaderFormat {
+    fn from(kind: TemplateMediaKind) -> Self {
+        match kind {
+            TemplateMediaKind::Image => Self::Image,
+            TemplateMediaKind::Video => Self::Video,
+            TemplateMediaKind::Document => Self::Document,
+        }
+    }
+}
+
+/// How an authentication template delivers its one-time code.
+///
+/// ```
+/// use meta_whatsapp::template::TemplateOtpType;
+///
+/// assert_eq!(TemplateOtpType::default().as_str(), "COPY_CODE");
+/// assert_eq!(TemplateOtpType::OneTap.as_str(), "ONE_TAP");
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
+pub enum TemplateOtpType {
+    /// The customer copies the code out of the message.
+    #[default]
+    CopyCode,
+    /// Android autofills the code into the requesting app.
+    OneTap,
+}
+
+impl TemplateOtpType {
+    /// Upper-case wire representation.
+    ///
+    /// ```
+    /// use meta_whatsapp::template::TemplateOtpType;
+    /// assert_eq!(TemplateOtpType::CopyCode.as_str(), "COPY_CODE");
+    /// ```
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::CopyCode => "COPY_CODE",
+            Self::OneTap => "ONE_TAP",
+        }
+    }
+}
+
+/// A text parameter doubles as a template example value.
+///
+/// Examples are text only — the create payload's `example.header_text` and
+/// `example.body_text` both take strings — so this conversion exists for
+/// ergonomics, not for the currency/date-time/media variants.
+///
+/// ```
+/// use meta_whatsapp::TemplateParameter;
+///
+/// let parameter: TemplateParameter = "Florian".into();
+/// assert_eq!(parameter, TemplateParameter::text("Florian"));
+/// ```
+impl From<&str> for TemplateParameter {
+    fn from(text: &str) -> Self {
+        Self::text(text)
+    }
+}
+
+/// An owned string becomes a text parameter, so `format!`-built examples work
+/// without an extra `TemplateParameter::text` call.
+///
+/// ```
+/// use meta_whatsapp::TemplateParameter;
+///
+/// let parameter: TemplateParameter = format!("Order {}", 42).into();
+/// assert_eq!(parameter, TemplateParameter::text("Order 42"));
+/// ```
+impl From<String> for TemplateParameter {
+    fn from(text: String) -> Self {
+        Self::Text { text }
+    }
+}
+
+/// One button of a template *definition*.
+///
+/// Sending a template later uses [`TemplateComponent::button`] with the
+/// send-side [`TemplateButtonType`]; a definition instead carries the label and
+/// destination Meta reviews.
+///
+/// ```
+/// use meta_whatsapp::template::TemplateButton;
+///
+/// let url = TemplateButton::url("Sendung verfolgen", "https://x.test/{{1}}")
+///     .with_example("https://x.test/1234");
+/// assert_eq!(url.kind(), "URL");
+/// assert!(url.validate().is_ok());
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum TemplateButton {
+    /// A reply the customer taps to send its text back.
+    QuickReply {
+        /// Label shown on the button.
+        text: String,
+    },
+    /// Opens a URL, optionally with one `{{1}}` variable.
+    Url {
+        /// Label shown on the button.
+        text: String,
+        /// Destination (`http://` or `https://`, may contain `{{1}}`).
+        url: String,
+        /// Sample destination; required when `url` contains a variable.
+        example: Option<String>,
+    },
+    /// Copies a code into the clipboard.
+    CopyCode {
+        /// Label shown on the button.
+        text: String,
+        /// Sample code the customer sees in the preview.
+        example: String,
+    },
+    /// Starts a phone call.
+    PhoneNumber {
+        /// Label shown on the button.
+        text: String,
+        /// E.164 number with an optional leading `+`.
+        phone_number: String,
+    },
+    /// An authentication button that delivers the one-time code.
+    Otp {
+        /// Delivery mode.
+        otp_type: TemplateOtpType,
+        /// Label shown on the button.
+        text: Option<String>,
+        /// Label for the autofill prompt (one-tap).
+        autofill_text: Option<String>,
+    },
+}
+
+impl TemplateButton {
+    /// A quick-reply button.
+    ///
+    /// ```
+    /// use meta_whatsapp::template::TemplateButton;
+    ///
+    /// assert!(TemplateButton::quick_reply("Ja").validate().is_ok());
+    /// ```
+    #[must_use]
+    pub fn quick_reply(text: impl Into<String>) -> Self {
+        Self::QuickReply { text: text.into() }
+    }
+
+    /// A URL button without an example (valid while the URL has no variable).
+    ///
+    /// ```
+    /// use meta_whatsapp::template::TemplateButton;
+    ///
+    /// assert!(TemplateButton::url("Web", "https://x.test").validate().is_ok());
+    /// ```
+    #[must_use]
+    pub fn url(text: impl Into<String>, url: impl Into<String>) -> Self {
+        Self::Url {
+            text: text.into(),
+            url: url.into(),
+            example: None,
+        }
+    }
+
+    /// A copy-code button, whose example is the code preview Meta shows.
+    ///
+    /// ```
+    /// use meta_whatsapp::template::TemplateButton;
+    ///
+    /// let button = TemplateButton::copy_code("Code kopieren", "ABC123");
+    /// assert!(button.validate().is_ok());
+    /// ```
+    #[must_use]
+    pub fn copy_code(text: impl Into<String>, example: impl Into<String>) -> Self {
+        Self::CopyCode {
+            text: text.into(),
+            example: example.into(),
+        }
+    }
+
+    /// A call button.
+    ///
+    /// ```
+    /// use meta_whatsapp::template::TemplateButton;
+    ///
+    /// assert!(TemplateButton::phone_number("Anrufen", "+4915112345678").validate().is_ok());
+    /// ```
+    #[must_use]
+    pub fn phone_number(text: impl Into<String>, phone_number: impl Into<String>) -> Self {
+        Self::PhoneNumber {
+            text: text.into(),
+            phone_number: phone_number.into(),
+        }
+    }
+
+    /// An OTP button for an authentication template.
+    ///
+    /// ```
+    /// use meta_whatsapp::template::{TemplateButton, TemplateOtpType};
+    ///
+    /// let button = TemplateButton::otp(TemplateOtpType::CopyCode).with_text("Code kopieren");
+    /// assert!(button.validate().is_ok());
+    /// ```
+    #[must_use]
+    pub fn otp(otp_type: TemplateOtpType) -> Self {
+        Self::Otp {
+            otp_type,
+            text: None,
+            autofill_text: None,
+        }
+    }
+
+    /// Sets the example of a URL or copy-code button; a no-op for the other
+    /// kinds, which carry no example.
+    ///
+    /// ```
+    /// use meta_whatsapp::template::TemplateButton;
+    ///
+    /// let button = TemplateButton::url("Web", "https://x.test/{{1}}")
+    ///     .with_example("https://x.test/1");
+    /// assert!(button.validate().is_ok());
+    /// ```
+    #[must_use]
+    pub fn with_example(mut self, example: impl Into<String>) -> Self {
+        let example = example.into();
+        match &mut self {
+            Self::Url { example: slot, .. } => *slot = Some(example),
+            Self::CopyCode { example: slot, .. } => *slot = example,
+            _ => {}
+        }
+        self
+    }
+
+    /// Sets the label of an OTP button; a no-op for the other kinds, whose
+    /// label is set by their constructor.
+    ///
+    /// ```
+    /// use meta_whatsapp::template::{TemplateButton, TemplateOtpType};
+    ///
+    /// let button = TemplateButton::otp(TemplateOtpType::OneTap).with_text("Autofill");
+    /// assert!(matches!(button, TemplateButton::Otp { text: Some(_), .. }));
+    /// ```
+    #[must_use]
+    pub fn with_text(mut self, text: impl Into<String>) -> Self {
+        if let Self::Otp { text: slot, .. } = &mut self {
+            *slot = Some(text.into());
+        }
+        self
+    }
+
+    /// Sets the autofill label of an OTP button; a no-op for the other kinds.
+    ///
+    /// ```
+    /// use meta_whatsapp::template::{TemplateButton, TemplateOtpType};
+    ///
+    /// let button = TemplateButton::otp(TemplateOtpType::OneTap)
+    ///     .with_autofill_text("Code einsetzen");
+    /// assert!(button.validate().is_ok());
+    /// ```
+    #[must_use]
+    pub fn with_autofill_text(mut self, text: impl Into<String>) -> Self {
+        if let Self::Otp { autofill_text, .. } = &mut self {
+            *autofill_text = Some(text.into());
+        }
+        self
+    }
+
+    /// Upper-case wire type: `QUICK_REPLY`, `URL`, `COPY_CODE`,
+    /// `PHONE_NUMBER` or `OTP`.
+    ///
+    /// ```
+    /// use meta_whatsapp::template::TemplateButton;
+    ///
+    /// assert_eq!(TemplateButton::quick_reply("Ja").kind(), "QUICK_REPLY");
+    /// assert_eq!(TemplateButton::copy_code("Code", "ABC").kind(), "COPY_CODE");
+    /// ```
+    #[must_use]
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::QuickReply { .. } => "QUICK_REPLY",
+            Self::Url { .. } => "URL",
+            Self::CopyCode { .. } => "COPY_CODE",
+            Self::PhoneNumber { .. } => "PHONE_NUMBER",
+            Self::Otp { .. } => "OTP",
+        }
+    }
+
+    /// Checks the label, the destination and the example.
+    ///
+    /// ```
+    /// use meta_whatsapp::template::TemplateButton;
+    ///
+    /// assert!(TemplateButton::url("Web", "ftp://x.test").validate().is_err());
+    /// assert!(TemplateButton::quick_reply("x".repeat(26)).validate().is_err());
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an empty or over-long label, a URL that is not
+    /// `http(s)` or has a variable but no example, a copy-code example outside
+    /// `1..=15` characters, a phone number that is not 7–15 digits, or an OTP
+    /// button without any label.
+    pub fn validate(&self) -> Result<()> {
+        match self {
+            Self::QuickReply { text } => {
+                validate_button_text("template.components.buttons.text", text)
+            }
+            Self::Url { text, url, example } => {
+                validate_button_text("template.components.buttons.text", text)?;
+                require_non_empty("template.components.buttons.url", url)?;
+                require_max_chars(
+                    "template.components.buttons.url",
+                    url,
+                    TEMPLATE_BUTTON_URL_MAX_CHARS,
+                )?;
+                if !(url.starts_with("https://") || url.starts_with("http://")) {
+                    return Err(Error::validation(
+                        "template.components.buttons.url",
+                        "must be an http:// or https:// URL",
+                    ));
+                }
+                match example {
+                    Some(example) => {
+                        require_non_empty("template.components.buttons.example", example)?;
+                        require_max_chars(
+                            "template.components.buttons.example",
+                            example,
+                            TEMPLATE_BUTTON_URL_MAX_CHARS,
+                        )?;
+                    }
+                    None if url.contains("{{") => {
+                        return Err(Error::validation(
+                            "template.components.buttons.example",
+                            "a URL with a variable needs an example value",
+                        ));
+                    }
+                    None => {}
+                }
+                Ok(())
+            }
+            Self::CopyCode { text, example } => {
+                validate_button_text("template.components.buttons.text", text)?;
+                require_non_empty("template.components.buttons.example", example)?;
+                require_max_chars(
+                    "template.components.buttons.example",
+                    example,
+                    TEMPLATE_BUTTON_EXAMPLE_MAX_CHARS,
+                )
+            }
+            Self::PhoneNumber { text, phone_number } => {
+                validate_button_text("template.components.buttons.text", text)?;
+                validate_button_phone_number(phone_number)
+            }
+            Self::Otp {
+                text,
+                autofill_text,
+                ..
+            } => {
+                for label in [text, autofill_text].into_iter().flatten() {
+                    require_non_empty("template.components.buttons.text", label)?;
+                    require_max_chars(
+                        "template.components.buttons.text",
+                        label,
+                        TEMPLATE_BUTTON_TEXT_MAX_CHARS,
+                    )?;
+                }
+                if text.is_none() && autofill_text.is_none() {
+                    return Err(Error::validation(
+                        "template.components.buttons.text",
+                        "an OTP button needs a text or an autofill_text",
+                    ));
+                }
+                Ok(())
+            }
+        }
+    }
+
+    fn render(&self) -> Value {
+        match self {
+            Self::QuickReply { text } => json!({ "type": "QUICK_REPLY", "text": text }),
+            Self::Url { text, url, example } => {
+                let mut object = Map::new();
+                object.insert("type".into(), json!("URL"));
+                object.insert("text".into(), json!(text));
+                object.insert("url".into(), json!(url));
+                if let Some(example) = example {
+                    object.insert("example".into(), json!([example]));
+                }
+                Value::Object(object)
+            }
+            Self::CopyCode { text, example } => {
+                json!({ "type": "COPY_CODE", "text": text, "example": example })
+            }
+            Self::PhoneNumber { text, phone_number } => json!({
+                "type": "PHONE_NUMBER",
+                "text": text,
+                "phone_number": phone_number,
+            }),
+            Self::Otp {
+                otp_type,
+                text,
+                autofill_text,
+            } => {
+                let mut object = Map::new();
+                object.insert("type".into(), json!("OTP"));
+                object.insert("otp_type".into(), json!(otp_type.as_str()));
+                if let Some(text) = text {
+                    object.insert("text".into(), json!(text));
+                }
+                if let Some(autofill_text) = autofill_text {
+                    object.insert("autofill_text".into(), json!(autofill_text));
+                }
+                Value::Object(object)
+            }
+        }
+    }
+}
+
+/// Checks a template button label.
+fn validate_button_text(field: &'static str, text: &str) -> Result<()> {
+    require_non_empty(field, text)?;
+    require_max_chars(field, text, TEMPLATE_BUTTON_TEXT_MAX_CHARS)
+}
+
+/// Checks a call-button number: 7–15 digits with an optional leading `+`.
+fn validate_button_phone_number(value: &str) -> Result<()> {
+    let digits = value.strip_prefix('+').unwrap_or(value);
+    let valid = (PHONE_NUMBER_MIN_DIGITS..=PHONE_NUMBER_MAX_DIGITS).contains(&digits.len())
+        && digits.bytes().all(|byte| byte.is_ascii_digit());
+    if valid {
+        Ok(())
+    } else {
+        Err(Error::validation(
+            "template.components.buttons.phone_number",
+            format!(
+                "must be {PHONE_NUMBER_MIN_DIGITS}..={PHONE_NUMBER_MAX_DIGITS} digits with an optional leading '+', got {value:?}"
+            ),
+        ))
+    }
+}
+
+/// Shortest E.164 subscriber number (the same range the blocklist accepts).
+const PHONE_NUMBER_MIN_DIGITS: usize = 7;
+
+/// Longest E.164 subscriber number.
+const PHONE_NUMBER_MAX_DIGITS: usize = 15;
+
+/// One component of a template *definition*.
+///
+/// A definition is what Meta reviews: component text with `{{1}}` placeholders
+/// plus one example value per placeholder. [`TemplateComponent`] is the
+/// send-side twin that carries the positional values, so the kinds line up
+/// (`HEADER`, `BODY`, `FOOTER`, `BUTTONS`) while the payloads differ.
+///
+/// ```
+/// use meta_whatsapp::template::{TemplateDefinitionComponent, TemplateParameter};
+///
+/// let body = TemplateDefinitionComponent::body_text("Hallo {{1}}")
+///     .with_example(TemplateParameter::text("Florian"));
+/// assert_eq!(body.kind(), "BODY");
+/// assert!(body.validate().is_ok());
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum TemplateDefinitionComponent {
+    /// `HEADER`: text with an example, or one media handle.
+    Header {
+        /// Header format.
+        format: TemplateHeaderFormat,
+        /// Text of a [`TemplateHeaderFormat::Text`] header.
+        text: Option<String>,
+        /// Example values: `header_text` for text, `header_handle` for media.
+        example: Vec<TemplateParameter>,
+    },
+    /// `BODY`: the message text, or the security recommendation of an
+    /// authentication template.
+    Body {
+        /// Text with placeholders.
+        text: Option<String>,
+        /// `add_security_recommendation` instead of a text (authentication).
+        security_recommendation: bool,
+        /// Example values (`body_text`).
+        example: Vec<TemplateParameter>,
+    },
+    /// `FOOTER`: one short line, or the lifetime of an authentication code.
+    Footer {
+        /// Footer text.
+        text: Option<String>,
+        /// `code_expiration_minutes` (authentication templates).
+        code_expiration_minutes: Option<u16>,
+    },
+    /// `BUTTONS`: the buttons below the message.
+    Buttons {
+        /// Buttons in display order.
+        buttons: Vec<TemplateButton>,
+    },
+}
+
+impl TemplateDefinitionComponent {
+    /// A text header.
+    ///
+    /// ```
+    /// use meta_whatsapp::template::TemplateDefinitionComponent;
+    ///
+    /// let header = TemplateDefinitionComponent::header_text("Hallo {{1}}").with_example("Florian");
+    /// assert!(header.validate().is_ok());
+    /// ```
+    #[must_use]
+    pub fn header_text(text: impl Into<String>) -> Self {
+        Self::Header {
+            format: TemplateHeaderFormat::Text,
+            text: Some(text.into()),
+            example: Vec::new(),
+        }
+    }
+
+    /// A media header with the handle Meta gave the upload.
+    ///
+    /// ```
+    /// use meta_whatsapp::template::{TemplateDefinitionComponent, TemplateHeaderFormat};
+    ///
+    /// let header = TemplateDefinitionComponent::header_media(TemplateHeaderFormat::Image, "4:handle");
+    /// assert!(header.validate().is_ok());
+    /// ```
+    #[must_use]
+    pub fn header_media(format: TemplateHeaderFormat, handle: impl Into<String>) -> Self {
+        Self::Header {
+            format,
+            text: None,
+            example: vec![TemplateParameter::text(handle)],
+        }
+    }
+
+    /// A body with `{{1}}`-style placeholders.
+    ///
+    /// ```
+    /// use meta_whatsapp::template::TemplateDefinitionComponent;
+    ///
+    /// let body = TemplateDefinitionComponent::body_text("Ihre Bestellung {{1}}").with_example("42");
+    /// assert!(body.validate().is_ok());
+    /// ```
+    #[must_use]
+    pub fn body_text(text: impl Into<String>) -> Self {
+        Self::Body {
+            text: Some(text.into()),
+            security_recommendation: false,
+            example: Vec::new(),
+        }
+    }
+
+    /// The body of an authentication template: Meta inserts the security
+    /// recommendation instead of a text.
+    ///
+    /// ```
+    /// use meta_whatsapp::template::TemplateDefinitionComponent;
+    ///
+    /// let body = TemplateDefinitionComponent::body_security_recommendation();
+    /// assert!(body.validate().is_ok());
+    /// ```
+    #[must_use]
+    pub fn body_security_recommendation() -> Self {
+        Self::Body {
+            text: None,
+            security_recommendation: true,
+            example: Vec::new(),
+        }
+    }
+
+    /// A footer line.
+    ///
+    /// ```
+    /// use meta_whatsapp::template::TemplateDefinitionComponent;
+    ///
+    /// assert!(TemplateDefinitionComponent::footer_text("Danke").validate().is_ok());
+    /// ```
+    #[must_use]
+    pub fn footer_text(text: impl Into<String>) -> Self {
+        Self::Footer {
+            text: Some(text.into()),
+            code_expiration_minutes: None,
+        }
+    }
+
+    /// The footer of an authentication template: how long the code stays valid.
+    ///
+    /// ```
+    /// use meta_whatsapp::template::TemplateDefinitionComponent;
+    ///
+    /// assert!(TemplateDefinitionComponent::footer_code_expiration(10).validate().is_ok());
+    /// ```
+    #[must_use]
+    pub fn footer_code_expiration(minutes: u16) -> Self {
+        Self::Footer {
+            text: None,
+            code_expiration_minutes: Some(minutes),
+        }
+    }
+
+    /// A `BUTTONS` component.
+    ///
+    /// ```
+    /// use meta_whatsapp::template::{TemplateButton, TemplateDefinitionComponent};
+    ///
+    /// let buttons = TemplateDefinitionComponent::buttons(vec![TemplateButton::quick_reply("Ja")]);
+    /// assert_eq!(buttons.kind(), "BUTTONS");
+    /// ```
+    #[must_use]
+    pub fn buttons(buttons: Vec<TemplateButton>) -> Self {
+        Self::Buttons { buttons }
+    }
+
+    /// Appends an example value to a header or body; a no-op for a footer or a
+    /// button group, which carry no example.
+    ///
+    /// ```
+    /// use meta_whatsapp::template::TemplateDefinitionComponent;
+    ///
+    /// let body = TemplateDefinitionComponent::body_text("{{1}} + {{2}}")
+    ///     .with_example("1")
+    ///     .with_example("2");
+    /// assert!(body.validate().is_ok());
+    /// ```
+    #[must_use]
+    pub fn with_example(mut self, example: impl Into<TemplateParameter>) -> Self {
+        let example = example.into();
+        match &mut self {
+            Self::Header {
+                example: values, ..
+            }
+            | Self::Body {
+                example: values, ..
+            } => {
+                values.push(example);
+            }
+            _ => {}
+        }
+        self
+    }
+
+    fn push_example(&mut self, example: TemplateParameter) {
+        match self {
+            Self::Header {
+                example: values, ..
+            }
+            | Self::Body {
+                example: values, ..
+            } => {
+                values.push(example);
+            }
+            _ => {}
+        }
+    }
+
+    fn set_header_text(&mut self, value: String) {
+        if let Self::Header { format, text, .. } = self {
+            *format = TemplateHeaderFormat::Text;
+            *text = Some(value);
+        }
+    }
+
+    fn set_body_text(&mut self, value: String) {
+        if let Self::Body {
+            text,
+            security_recommendation,
+            ..
+        } = self
+        {
+            *text = Some(value);
+            *security_recommendation = false;
+        }
+    }
+
+    fn push_button(&mut self, button: TemplateButton) {
+        if let Self::Buttons { buttons } = self {
+            buttons.push(button);
+        }
+    }
+
+    /// Upper-case wire type: `HEADER`, `BODY`, `FOOTER` or `BUTTONS`.
+    ///
+    /// ```
+    /// use meta_whatsapp::template::TemplateDefinitionComponent;
+    ///
+    /// assert_eq!(TemplateDefinitionComponent::body_text("x").kind(), "BODY");
+    /// assert_eq!(
+    ///     TemplateDefinitionComponent::footer_text("f").kind(),
+    ///     "FOOTER"
+    /// );
+    /// ```
+    #[must_use]
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Header { .. } => "HEADER",
+            Self::Body { .. } => "BODY",
+            Self::Footer { .. } => "FOOTER",
+            Self::Buttons { .. } => "BUTTONS",
+        }
+    }
+
+    /// Checks the text, the example values and any nested button.
+    ///
+    /// ```
+    /// use meta_whatsapp::template::TemplateDefinitionComponent;
+    ///
+    /// // A placeholder without an example is rejected by Meta, so it is
+    /// // rejected here and never reaches the network.
+    /// assert!(TemplateDefinitionComponent::body_text("Hallo {{1}}").validate().is_err());
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] naming the offending field for a missing or
+    /// over-long text, a placeholder without an example, a non-text example, a
+    /// media header without exactly one handle, a footer with both or neither
+    /// variant, and for too many or invalid buttons.
+    pub fn validate(&self) -> Result<()> {
+        match self {
+            Self::Header {
+                format,
+                text,
+                example,
+            } => validate_header(*format, text.as_deref(), example),
+            Self::Body {
+                text,
+                security_recommendation,
+                example,
+            } => validate_body(text.as_deref(), *security_recommendation, example),
+            Self::Footer {
+                text,
+                code_expiration_minutes,
+            } => validate_footer(text.as_deref(), *code_expiration_minutes),
+            Self::Buttons { buttons } => validate_buttons(buttons),
+        }
+    }
+
+    fn render(&self) -> Value {
+        match self {
+            Self::Header {
+                format,
+                text,
+                example,
+            } => {
+                let mut object = Map::new();
+                object.insert("type".into(), json!("HEADER"));
+                object.insert("format".into(), json!(format.as_str()));
+                if let Some(text) = text {
+                    object.insert("text".into(), json!(text));
+                }
+                if !example.is_empty() {
+                    let key = if format.media_kind().is_some() {
+                        "header_handle"
+                    } else {
+                        "header_text"
+                    };
+                    let mut values = Map::new();
+                    values.insert(key.to_string(), json!(example_values(example)));
+                    object.insert("example".into(), Value::Object(values));
+                }
+                Value::Object(object)
+            }
+            Self::Body {
+                text,
+                security_recommendation,
+                example,
+            } => {
+                let mut object = Map::new();
+                object.insert("type".into(), json!("BODY"));
+                if let Some(text) = text {
+                    object.insert("text".into(), json!(text));
+                }
+                if *security_recommendation {
+                    object.insert("add_security_recommendation".into(), json!(true));
+                }
+                if !example.is_empty() {
+                    object.insert(
+                        "example".into(),
+                        json!({ "body_text": [example_values(example)] }),
+                    );
+                }
+                Value::Object(object)
+            }
+            Self::Footer {
+                text,
+                code_expiration_minutes,
+            } => {
+                let mut object = Map::new();
+                object.insert("type".into(), json!("FOOTER"));
+                if let Some(text) = text {
+                    object.insert("text".into(), json!(text));
+                }
+                if let Some(minutes) = code_expiration_minutes {
+                    object.insert("code_expiration_minutes".into(), json!(minutes));
+                }
+                Value::Object(object)
+            }
+            Self::Buttons { buttons } => json!({
+                "type": "BUTTONS",
+                "buttons": buttons.iter().map(TemplateButton::render).collect::<Vec<_>>(),
+            }),
+        }
+    }
+}
+
+/// Checks a header component: text with examples, one media handle, or a bare
+/// location pin.
+fn validate_header(
+    format: TemplateHeaderFormat,
+    text: Option<&str>,
+    example: &[TemplateParameter],
+) -> Result<()> {
+    validate_examples("template.components.header.example", example)?;
+    match format.media_kind() {
+        Some(_) => {
+            if text.is_some() {
+                return Err(Error::validation(
+                    "template.components.header.text",
+                    "a media header carries no text",
+                ));
+            }
+            if example.len() != 1 {
+                return Err(Error::validation(
+                    "template.components.header.example",
+                    format!(
+                        "a {} header needs exactly one handle, got {}",
+                        format.as_str(),
+                        example.len()
+                    ),
+                ));
+            }
+            Ok(())
+        }
+        None if matches!(format, TemplateHeaderFormat::Location) => {
+            if text.is_some() || !example.is_empty() {
+                return Err(Error::validation(
+                    "template.components.header",
+                    "a location header carries neither text nor example",
+                ));
+            }
+            Ok(())
+        }
+        None => {
+            let value = text.unwrap_or_default();
+            require_non_empty("template.components.header.text", value)?;
+            require_max_chars(
+                "template.components.header.text",
+                value,
+                TEMPLATE_HEADER_MAX_CHARS,
+            )?;
+            require_examples_for_placeholders("template.components.header.text", value, example)
+        }
+    }
+}
+
+/// Checks a body component: text with examples, or Meta's security
+/// recommendation.
+fn validate_body(
+    text: Option<&str>,
+    security_recommendation: bool,
+    example: &[TemplateParameter],
+) -> Result<()> {
+    validate_examples("template.components.body.example", example)?;
+    if security_recommendation {
+        if text.is_some_and(|text| !text.is_empty()) {
+            return Err(Error::validation(
+                "template.components.body",
+                "either a text or add_security_recommendation, not both",
+            ));
+        }
+        if !example.is_empty() {
+            return Err(Error::validation(
+                "template.components.body.example",
+                "the security recommendation carries no example",
+            ));
+        }
+        return Ok(());
+    }
+    let value = text.unwrap_or_default();
+    require_non_empty("template.components.body.text", value)?;
+    require_max_bytes(
+        "template.components.body.text",
+        value,
+        TEMPLATE_BODY_MAX_BYTES,
+    )?;
+    require_examples_for_placeholders("template.components.body.text", value, example)
+}
+
+/// Checks a footer component: a text, or the lifetime of an authentication
+/// code.
+fn validate_footer(text: Option<&str>, code_expiration_minutes: Option<u16>) -> Result<()> {
+    match (text, code_expiration_minutes) {
+        (Some(text), None) => {
+            require_non_empty("template.components.footer.text", text)?;
+            require_max_chars(
+                "template.components.footer.text",
+                text,
+                TEMPLATE_FOOTER_MAX_CHARS,
+            )
+        }
+        (None, Some(minutes)) => {
+            if !(1..=TEMPLATE_CODE_EXPIRATION_MINUTES_MAX).contains(&minutes) {
+                return Err(Error::validation(
+                    "template.components.footer.code_expiration_minutes",
+                    format!(
+                        "must be within 1..={TEMPLATE_CODE_EXPIRATION_MINUTES_MAX}, got {minutes}"
+                    ),
+                ));
+            }
+            Ok(())
+        }
+        (Some(_), Some(_)) => Err(Error::validation(
+            "template.components.footer",
+            "either a text or code_expiration_minutes, not both",
+        )),
+        (None, None) => Err(Error::validation(
+            "template.components.footer",
+            "needs a text or code_expiration_minutes",
+        )),
+    }
+}
+
+/// Checks the example list of a header or body component.
+fn validate_examples(field: &'static str, example: &[TemplateParameter]) -> Result<()> {
+    if example.len() > TEMPLATE_EXAMPLES_MAX {
+        return Err(Error::validation(
+            field,
+            format!(
+                "at most {TEMPLATE_EXAMPLES_MAX} example values are allowed, got {}",
+                example.len()
+            ),
+        ));
+    }
+    for parameter in example {
+        if !matches!(parameter, TemplateParameter::Text { .. }) {
+            return Err(Error::validation(
+                field,
+                "only text example values are supported",
+            ));
+        }
+        parameter.validate()?;
+    }
+    Ok(())
+}
+
+/// A text with `{{…}}` placeholders needs at least one example value per
+/// placeholder, and examples are only meaningful next to a placeholder.
+fn require_examples_for_placeholders(
+    field: &'static str,
+    text: &str,
+    example: &[TemplateParameter],
+) -> Result<()> {
+    let placeholders = text.matches("{{").count();
+    if placeholders == 0 {
+        if example.is_empty() {
+            return Ok(());
+        }
+        return Err(Error::validation(
+            field,
+            "an example value needs a placeholder in the text",
+        ));
+    }
+    if example.is_empty() {
+        return Err(Error::validation(
+            field,
+            format!("{placeholders} placeholder(s) need an example value"),
+        ));
+    }
+    if example.len() > placeholders {
+        return Err(Error::validation(
+            field,
+            format!(
+                "at most {placeholders} example value(s) match the placeholders, got {}",
+                example.len()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// Checks the button list of a `BUTTONS` component.
+fn validate_buttons(buttons: &[TemplateButton]) -> Result<()> {
+    if buttons.is_empty() {
+        return Err(Error::validation(
+            "template.components.buttons",
+            "need at least one button",
+        ));
+    }
+    if buttons.len() > TEMPLATE_BUTTONS_MAX {
+        return Err(Error::validation(
+            "template.components.buttons",
+            format!(
+                "at most {TEMPLATE_BUTTONS_MAX} buttons are allowed, got {}",
+                buttons.len()
+            ),
+        ));
+    }
+    let urls = buttons
+        .iter()
+        .filter(|button| matches!(button, TemplateButton::Url { .. }))
+        .count();
+    if urls > TEMPLATE_URL_BUTTONS_MAX {
+        return Err(Error::validation(
+            "template.components.buttons",
+            format!("at most {TEMPLATE_URL_BUTTONS_MAX} URL buttons are allowed, got {urls}"),
+        ));
+    }
+    let copy_codes = buttons
+        .iter()
+        .filter(|button| matches!(button, TemplateButton::CopyCode { .. }))
+        .count();
+    if copy_codes > TEMPLATE_COPY_CODE_BUTTONS_MAX {
+        return Err(Error::validation(
+            "template.components.buttons",
+            format!(
+                "at most {TEMPLATE_COPY_CODE_BUTTONS_MAX} copy-code button is allowed, got {copy_codes}"
+            ),
+        ));
+    }
+    for button in buttons {
+        button.validate()?;
+    }
+    Ok(())
+}
+
+/// The example texts of a component, in placeholder order.
+fn example_values(example: &[TemplateParameter]) -> Vec<&str> {
+    example
+        .iter()
+        .filter_map(|parameter| match parameter {
+            TemplateParameter::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Checks a template name: non-empty and at most
+/// [`TEMPLATE_NAME_MAX_BYTES`] bytes.
+pub(crate) fn validate_template_name(name: &str) -> Result<()> {
+    require_non_empty("template.name", name)?;
+    require_max_bytes("template.name", name, TEMPLATE_NAME_MAX_BYTES)
+}
+
+/// Checks an id that becomes a URL path segment of the template endpoints.
+pub(crate) fn validate_template_owner_id(id: &str) -> Result<()> {
+    if id.is_empty() {
+        return Err(Error::validation("phone_number_id", "must not be empty"));
+    }
+    if id.len() > TEMPLATE_ID_MAX_DIGITS || !id.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(Error::validation(
+            "phone_number_id",
+            format!("must be digits only (at most {TEMPLATE_ID_MAX_DIGITS})"),
+        ));
+    }
+    Ok(())
+}
+
+/// A template definition for `POST /{phone_number_id}/message_templates`.
+///
+/// A definition is the reviewable shape Meta stores: name, language, category
+/// and the component texts with their example values. Sending the approved
+/// template later is [`TemplateMessage`], which carries the values instead.
+///
+/// The category-specific review rules (an OTP button only in an
+/// `AUTHENTICATION` template, a media header only with an uploaded handle) are
+/// Meta's, not local checks: what this crate rejects is what would be malformed
+/// on the wire, so a well-formed definition that Meta dislikes fails with
+/// [`Error::Api`] and a message.
+///
+/// ```
+/// use meta_whatsapp::{TemplateButton, TemplateCategory, TemplateDefinition};
+///
+/// let definition = TemplateDefinition::new("order_update", "de_DE", TemplateCategory::Utility)
+///     .header_text("Ihre Bestellung {{1}}")
+///     .header_example("1234")
+///     .body_text("Hallo {{1}}, die Bestellung {{2}} ist unterwegs.")
+///     .body_example("Florian")
+///     .body_example("1234")
+///     .footer_text("Danke für Ihren Einkauf")
+///     .button(TemplateButton::quick_reply("Alles klar"));
+///
+/// let payload = definition.render()?;
+/// assert_eq!(payload["language"], "de_DE");
+/// assert_eq!(payload["category"], "UTILITY");
+/// assert_eq!(payload["components"][0]["format"], "TEXT");
+/// assert_eq!(payload["components"][1]["example"]["body_text"][0][1], "1234");
+/// # Ok::<(), meta_whatsapp::Error>(())
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TemplateDefinition {
+    /// Name Meta references the template by, and the key of an edit.
+    pub name: String,
+    /// Language this definition is for.
+    pub language: TemplateLanguage,
+    /// Category Meta reviews the template against.
+    pub category: TemplateCategory,
+    /// Placeholder style (`POSITIONAL` unless set otherwise).
+    pub parameter_format: TemplateParameterFormat,
+    /// Components in render order.
+    pub components: Vec<TemplateDefinitionComponent>,
+}
+
+impl TemplateDefinition {
+    /// A definition with no components — invalid until a body is added.
+    ///
+    /// ```
+    /// use meta_whatsapp::{TemplateCategory, TemplateDefinition};
+    ///
+    /// let definition = TemplateDefinition::new("hello_world", "en_US", TemplateCategory::Marketing);
+    /// assert_eq!(definition.category.as_str(), "MARKETING");
+    /// assert!(definition.validate().is_err(), "a body is still missing");
+    /// ```
+    pub fn new(
+        name: impl Into<String>,
+        language_code: impl Into<String>,
+        category: TemplateCategory,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            language: TemplateLanguage::new(language_code),
+            category,
+            parameter_format: TemplateParameterFormat::default(),
+            components: Vec::new(),
+        }
+    }
+
+    /// Sets the placeholder style.
+    ///
+    /// ```
+    /// use meta_whatsapp::template::TemplateParameterFormat;
+    /// use meta_whatsapp::{TemplateCategory, TemplateDefinition};
+    ///
+    /// let definition = TemplateDefinition::new("t", "de", TemplateCategory::Utility)
+    ///     .parameter_format(TemplateParameterFormat::Named);
+    /// assert_eq!(definition.parameter_format.as_str(), "NAMED");
+    /// ```
+    #[must_use]
+    pub fn parameter_format(mut self, format: TemplateParameterFormat) -> Self {
+        self.parameter_format = format;
+        self
+    }
+
+    /// Appends a component verbatim; a duplicate kind is rejected by
+    /// [`TemplateDefinition::validate`].
+    ///
+    /// ```
+    /// use meta_whatsapp::template::TemplateDefinitionComponent;
+    /// use meta_whatsapp::{TemplateCategory, TemplateDefinition};
+    ///
+    /// let definition = TemplateDefinition::new("t", "de", TemplateCategory::Utility)
+    ///     .component(TemplateDefinitionComponent::footer_text("Danke"));
+    /// assert_eq!(definition.components.len(), 1);
+    /// ```
+    #[must_use]
+    pub fn component(mut self, component: TemplateDefinitionComponent) -> Self {
+        self.components.push(component);
+        self
+    }
+
+    /// Sets the text header, replacing a media header of the same definition.
+    ///
+    /// ```
+    /// use meta_whatsapp::{TemplateCategory, TemplateDefinition};
+    ///
+    /// let definition = TemplateDefinition::new("t", "de", TemplateCategory::Utility)
+    ///     .header_text("Neuigkeiten");
+    /// assert_eq!(definition.components[0].kind(), "HEADER");
+    /// ```
+    #[must_use]
+    pub fn header_text(mut self, text: impl Into<String>) -> Self {
+        let text = text.into();
+        match self.component_index("HEADER") {
+            Some(index) => self.components[index].set_header_text(text),
+            None => self
+                .components
+                .push(TemplateDefinitionComponent::header_text(text)),
+        }
+        self
+    }
+
+    /// Sets a media header (image, video or document) with the handle Meta gave
+    /// the upload.
+    ///
+    /// ```
+    /// use meta_whatsapp::template::TemplateHeaderFormat;
+    /// use meta_whatsapp::{TemplateCategory, TemplateDefinition};
+    ///
+    /// let definition = TemplateDefinition::new("t", "de", TemplateCategory::Utility)
+    ///     .header_media(TemplateHeaderFormat::Image, "4:handle");
+    /// assert!(definition.components[0].validate().is_ok());
+    /// ```
+    #[must_use]
+    pub fn header_media(mut self, format: TemplateHeaderFormat, handle: impl Into<String>) -> Self {
+        let header = TemplateDefinitionComponent::header_media(format, handle);
+        match self.component_index("HEADER") {
+            Some(index) => self.components[index] = header,
+            None => self.components.push(header),
+        }
+        self
+    }
+
+    /// Appends a header example value.
+    ///
+    /// ```
+    /// use meta_whatsapp::{TemplateCategory, TemplateDefinition};
+    ///
+    /// let definition = TemplateDefinition::new("t", "de", TemplateCategory::Utility)
+    ///     .header_text("Hallo {{1}}")
+    ///     .header_example("Florian");
+    /// assert!(definition.components[0].validate().is_ok());
+    /// ```
+    #[must_use]
+    pub fn header_example(mut self, example: impl Into<TemplateParameter>) -> Self {
+        let example = example.into();
+        match self.component_index("HEADER") {
+            Some(index) => self.components[index].push_example(example),
+            None => self.components.push(TemplateDefinitionComponent::Header {
+                format: TemplateHeaderFormat::Text,
+                text: None,
+                example: vec![example],
+            }),
+        }
+        self
+    }
+
+    /// Sets the body text, replacing a security-recommendation body.
+    ///
+    /// ```
+    /// use meta_whatsapp::{TemplateCategory, TemplateDefinition};
+    ///
+    /// let definition = TemplateDefinition::new("t", "de", TemplateCategory::Utility)
+    ///     .body_text("Danke für Ihren Einkauf");
+    /// assert!(definition.validate().is_ok());
+    /// ```
+    #[must_use]
+    pub fn body_text(mut self, text: impl Into<String>) -> Self {
+        let text = text.into();
+        match self.component_index("BODY") {
+            Some(index) => self.components[index].set_body_text(text),
+            None => self
+                .components
+                .push(TemplateDefinitionComponent::body_text(text)),
+        }
+        self
+    }
+
+    /// Replaces the body with Meta's security recommendation (authentication
+    /// templates only).
+    ///
+    /// ```
+    /// use meta_whatsapp::{TemplateCategory, TemplateDefinition};
+    ///
+    /// let definition = TemplateDefinition::new("otp_login", "de", TemplateCategory::Authentication)
+    ///     .security_recommendation();
+    /// assert!(definition.validate().is_ok());
+    /// ```
+    #[must_use]
+    pub fn security_recommendation(mut self) -> Self {
+        let body = TemplateDefinitionComponent::body_security_recommendation();
+        match self.component_index("BODY") {
+            Some(index) => self.components[index] = body,
+            None => self.components.push(body),
+        }
+        self
+    }
+
+    /// Appends a body example value.
+    ///
+    /// ```
+    /// use meta_whatsapp::{TemplateCategory, TemplateDefinition};
+    ///
+    /// let definition = TemplateDefinition::new("t", "de", TemplateCategory::Utility)
+    ///     .body_text("Hallo {{1}}")
+    ///     .body_example("Florian");
+    /// assert!(definition.validate().is_ok());
+    /// ```
+    #[must_use]
+    pub fn body_example(mut self, example: impl Into<TemplateParameter>) -> Self {
+        let example = example.into();
+        match self.component_index("BODY") {
+            Some(index) => self.components[index].push_example(example),
+            None => self.components.push(TemplateDefinitionComponent::Body {
+                text: None,
+                security_recommendation: false,
+                example: vec![example],
+            }),
+        }
+        self
+    }
+
+    /// Sets the footer text, replacing a code-expiration footer.
+    ///
+    /// ```
+    /// use meta_whatsapp::{TemplateCategory, TemplateDefinition};
+    ///
+    /// let definition = TemplateDefinition::new("t", "de", TemplateCategory::Utility)
+    ///     .body_text("Danke")
+    ///     .footer_text("Kein Reply nötig");
+    /// assert!(definition.validate().is_ok());
+    /// ```
+    #[must_use]
+    pub fn footer_text(mut self, text: impl Into<String>) -> Self {
+        let footer = TemplateDefinitionComponent::footer_text(text);
+        match self.component_index("FOOTER") {
+            Some(index) => self.components[index] = footer,
+            None => self.components.push(footer),
+        }
+        self
+    }
+
+    /// Sets how long an authentication code stays valid (`1..=90` minutes).
+    ///
+    /// ```
+    /// use meta_whatsapp::{TemplateCategory, TemplateDefinition};
+    ///
+    /// let definition = TemplateDefinition::new("otp_login", "de", TemplateCategory::Authentication)
+    ///     .security_recommendation()
+    ///     .code_expiration_minutes(10);
+    /// assert!(definition.validate().is_ok());
+    /// assert!(definition.clone().code_expiration_minutes(91).validate().is_err());
+    /// ```
+    #[must_use]
+    pub fn code_expiration_minutes(mut self, minutes: u16) -> Self {
+        let footer = TemplateDefinitionComponent::footer_code_expiration(minutes);
+        match self.component_index("FOOTER") {
+            Some(index) => self.components[index] = footer,
+            None => self.components.push(footer),
+        }
+        self
+    }
+
+    /// Appends a button, creating the `BUTTONS` component on first use.
+    ///
+    /// ```
+    /// use meta_whatsapp::{TemplateButton, TemplateCategory, TemplateDefinition};
+    ///
+    /// let definition = TemplateDefinition::new("t", "de", TemplateCategory::Utility)
+    ///     .body_text("Danke")
+    ///     .button(TemplateButton::quick_reply("Ja"))
+    ///     .button(TemplateButton::quick_reply("Nein"));
+    /// assert!(definition.validate().is_ok());
+    /// ```
+    #[must_use]
+    pub fn button(mut self, button: TemplateButton) -> Self {
+        match self.component_index("BUTTONS") {
+            Some(index) => self.components[index].push_button(button),
+            None => self
+                .components
+                .push(TemplateDefinitionComponent::buttons(vec![button])),
+        }
+        self
+    }
+
+    /// Checks the name, the language, the component set and every component.
+    ///
+    /// ```
+    /// use meta_whatsapp::{TemplateCategory, TemplateDefinition};
+    ///
+    /// assert!(TemplateDefinition::new("t", "de", TemplateCategory::Utility)
+    ///     .body_text("Danke")
+    ///     .validate()
+    ///     .is_ok());
+    /// assert!(TemplateDefinition::new("", "de", TemplateCategory::Utility)
+    ///     .body_text("Danke")
+    ///     .validate()
+    ///     .is_err());
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an empty or over-long name, a bad language
+    /// code, a missing body, a duplicate or unsupported component, and every
+    /// limit the components themselves enforce.
+    pub fn validate(&self) -> Result<()> {
+        validate_template_name(&self.name)?;
+        self.language.validate()?;
+        validate_component_set(&self.components)?;
+        if !self
+            .components
+            .iter()
+            .any(|component| component.kind() == "BODY")
+        {
+            return Err(Error::validation(
+                "template.components",
+                "a body component is required",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Validates and renders the create payload.
+    ///
+    /// ```
+    /// use meta_whatsapp::{TemplateCategory, TemplateDefinition};
+    ///
+    /// let payload = TemplateDefinition::new("hello_world", "en_US", TemplateCategory::Utility)
+    ///     .body_text("Danke")
+    ///     .render()?;
+    /// assert_eq!(payload["parameter_format"], "POSITIONAL");
+    /// assert_eq!(payload["components"][0]["type"], "BODY");
+    /// # Ok::<(), meta_whatsapp::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] from [`TemplateDefinition::validate`].
+    pub fn render(&self) -> Result<Value> {
+        self.validate()?;
+        let mut object = Map::new();
+        object.insert("name".into(), json!(self.name));
+        object.insert("language".into(), json!(self.language.code));
+        object.insert("category".into(), json!(self.category.as_str()));
+        object.insert(
+            "parameter_format".into(),
+            json!(self.parameter_format.as_str()),
+        );
+        object.insert(
+            "components".into(),
+            Value::Array(
+                self.components
+                    .iter()
+                    .map(TemplateDefinitionComponent::render)
+                    .collect(),
+            ),
+        );
+        Ok(Value::Object(object))
+    }
+
+    fn component_index(&self, kind: &'static str) -> Option<usize> {
+        self.components
+            .iter()
+            .position(|component| component.kind() == kind)
+    }
+}
+
+/// An edit of an existing template for
+/// `PUT /{phone_number_id}/message_templates`.
+///
+/// Name and language identify the template; `category` and the components are
+/// what the edit changes. At least one of them has to be present, otherwise the
+/// request could not change anything.
+///
+/// ```
+/// use meta_whatsapp::template::{TemplateDefinitionComponent, TemplateUpdate};
+/// use meta_whatsapp::TemplateCategory;
+///
+/// let update = TemplateUpdate::new("order_update", "de")
+///     .category(TemplateCategory::Utility)
+///     .component(TemplateDefinitionComponent::body_text("Neu: {{1}}").with_example("42"));
+///
+/// let payload = update.render()?;
+/// assert_eq!(payload["name"], "order_update");
+/// assert_eq!(payload["category"], "UTILITY");
+/// # Ok::<(), meta_whatsapp::Error>(())
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TemplateUpdate {
+    /// Name of the template to edit.
+    pub name: String,
+    /// Language of the template to edit.
+    pub language: TemplateLanguage,
+    /// New category, when the edit moves the template.
+    pub category: Option<TemplateCategory>,
+    /// New components, in render order (may be empty).
+    pub components: Vec<TemplateDefinitionComponent>,
+}
+
+impl TemplateUpdate {
+    /// An edit that only names the template.
+    ///
+    /// ```
+    /// use meta_whatsapp::template::TemplateUpdate;
+    ///
+    /// let update = TemplateUpdate::new("order_update", "de");
+    /// assert_eq!(update.name, "order_update");
+    /// assert!(update.validate().is_err(), "nothing would change");
+    /// ```
+    pub fn new(name: impl Into<String>, language_code: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            language: TemplateLanguage::new(language_code),
+            category: None,
+            components: Vec::new(),
+        }
+    }
+
+    /// Sets the new category.
+    ///
+    /// ```
+    /// use meta_whatsapp::template::TemplateUpdate;
+    /// use meta_whatsapp::TemplateCategory;
+    ///
+    /// let update = TemplateUpdate::new("t", "de").category(TemplateCategory::Marketing);
+    /// assert!(update.validate().is_ok());
+    /// ```
+    #[must_use]
+    pub fn category(mut self, category: TemplateCategory) -> Self {
+        self.category = Some(category);
+        self
+    }
+
+    /// Appends a component to replace the stored one of the same kind.
+    ///
+    /// ```
+    /// use meta_whatsapp::template::{TemplateDefinitionComponent, TemplateUpdate};
+    ///
+    /// let update = TemplateUpdate::new("t", "de")
+    ///     .component(TemplateDefinitionComponent::footer_text("Danke"));
+    /// assert_eq!(update.components.len(), 1);
+    /// ```
+    #[must_use]
+    pub fn component(mut self, component: TemplateDefinitionComponent) -> Self {
+        self.components.push(component);
+        self
+    }
+
+    /// Checks the name, the language and any component that is sent.
+    ///
+    /// ```
+    /// use meta_whatsapp::template::TemplateUpdate;
+    ///
+    /// assert!(TemplateUpdate::new("t", "de").validate().is_err());
+    /// assert!(TemplateUpdate::new("", "de")
+    ///     .category(meta_whatsapp::TemplateCategory::Utility)
+    ///     .validate()
+    ///     .is_err());
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an empty or over-long name, a bad language
+    /// code, an edit that changes nothing, or an invalid component.
+    pub fn validate(&self) -> Result<()> {
+        validate_template_name(&self.name)?;
+        self.language.validate()?;
+        if self.category.is_none() && self.components.is_empty() {
+            return Err(Error::validation(
+                "template.update",
+                "an edit needs a category or at least one component",
+            ));
+        }
+        validate_component_set(&self.components)
+    }
+
+    /// Validates and renders the edit payload.
+    ///
+    /// ```
+    /// use meta_whatsapp::template::TemplateUpdate;
+    ///
+    /// let payload = TemplateUpdate::new("t", "de")
+    ///     .category(meta_whatsapp::TemplateCategory::Utility)
+    ///     .render()?;
+    /// assert_eq!(payload["language"], "de");
+    /// assert!(payload.get("components").is_none());
+    /// # Ok::<(), meta_whatsapp::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] from [`TemplateUpdate::validate`].
+    pub fn render(&self) -> Result<Value> {
+        self.validate()?;
+        let mut object = Map::new();
+        object.insert("name".into(), json!(self.name));
+        object.insert("language".into(), json!(self.language.code));
+        if let Some(category) = self.category {
+            object.insert("category".into(), json!(category.as_str()));
+        }
+        if !self.components.is_empty() {
+            object.insert(
+                "components".into(),
+                Value::Array(
+                    self.components
+                        .iter()
+                        .map(TemplateDefinitionComponent::render)
+                        .collect(),
+                ),
+            );
+        }
+        Ok(Value::Object(object))
+    }
+}
+
+/// Meta's answer to a successful create or edit.
+///
+/// The two endpoints answer differently — create returns `{id, status,
+/// category}`, edit `{"success": true}` — so every field is optional and
+/// unknown members are kept.
+///
+/// ```
+/// use meta_whatsapp::template::TemplateAck;
+///
+/// let ack = TemplateAck::from_value(&serde_json::json!({"id": "1234", "status": "PENDING"}))?;
+/// assert_eq!(ack.id.as_deref(), Some("1234"));
+/// assert!(ack.is_success());
+/// # Ok::<(), meta_whatsapp::Error>(())
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct TemplateAck {
+    /// Id Meta assigned to a new template.
+    #[serde(default)]
+    pub id: Option<String>,
+    /// Review status, e.g. `PENDING`.
+    #[serde(default)]
+    pub status: Option<String>,
+    /// Category Meta stored.
+    #[serde(default)]
+    pub category: Option<String>,
+    /// Meta's success flag, when the endpoint sends one.
+    #[serde(default)]
+    pub success: Option<bool>,
+    /// Fields this crate does not model, preserved verbatim.
+    #[serde(default, flatten)]
+    pub extra: Map<String, Value>,
+}
+
+impl TemplateAck {
+    /// Decodes a 2xx body; nothing is required, unknown members are kept.
+    ///
+    /// ```
+    /// use meta_whatsapp::template::TemplateAck;
+    ///
+    /// let ack = TemplateAck::from_value(&serde_json::json!({"success": true, "new_field": 7}))?;
+    /// assert_eq!(ack.extra["new_field"], 7);
+    /// assert!(TemplateAck::from_value(&serde_json::json!([1, 2])).is_err());
+    /// # Ok::<(), meta_whatsapp::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Json`] when the body is not a JSON object.
+    pub fn from_value(value: &Value) -> Result<Self> {
+        serde_json::from_value(value.clone()).map_err(Error::from)
+    }
+
+    /// Whether Meta reported the call as accepted: `true` unless it explicitly
+    /// said `success: false` (a 2xx already passed the client's status check).
+    ///
+    /// ```
+    /// use meta_whatsapp::template::TemplateAck;
+    ///
+    /// assert!(TemplateAck::from_value(&serde_json::json!({"status": "PENDING"}))?.is_success());
+    /// assert!(!TemplateAck::from_value(&serde_json::json!({"success": false}))?.is_success());
+    /// # Ok::<(), meta_whatsapp::Error>(())
+    /// ```
+    #[must_use]
+    pub fn is_success(&self) -> bool {
+        !matches!(self.success, Some(false))
+    }
+}
+
+/// Meta's answer to a successful delete (`{"success": true}`).
+///
+/// ```
+/// use meta_whatsapp::template::TemplateDeleteAck;
+///
+/// let ack = TemplateDeleteAck::from_value(&serde_json::json!({"success": true}))?;
+/// assert!(ack.is_success());
+/// # Ok::<(), meta_whatsapp::Error>(())
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct TemplateDeleteAck {
+    /// Meta's success flag, when it sends one.
+    #[serde(default)]
+    pub success: Option<bool>,
+    /// Fields this crate does not model, preserved verbatim.
+    #[serde(default, flatten)]
+    pub extra: Map<String, Value>,
+}
+
+impl TemplateDeleteAck {
+    /// Decodes a 2xx body; nothing is required, unknown members are kept.
+    ///
+    /// ```
+    /// use meta_whatsapp::template::TemplateDeleteAck;
+    ///
+    /// let ack = TemplateDeleteAck::from_value(&serde_json::json!({}))?;
+    /// assert_eq!(ack.success, None);
+    /// assert!(ack.is_success(), "a 2xx without a flag is still accepted");
+    /// # Ok::<(), meta_whatsapp::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Json`] when the body is not a JSON object.
+    pub fn from_value(value: &Value) -> Result<Self> {
+        serde_json::from_value(value.clone()).map_err(Error::from)
+    }
+
+    /// Whether Meta reported the delete as accepted: `true` unless it
+    /// explicitly said `success: false`.
+    ///
+    /// ```
+    /// use meta_whatsapp::template::TemplateDeleteAck;
+    ///
+    /// assert!(!TemplateDeleteAck::from_value(&serde_json::json!({"success": false}))?.is_success());
+    /// # Ok::<(), meta_whatsapp::Error>(())
+    /// ```
+    #[must_use]
+    pub fn is_success(&self) -> bool {
+        !matches!(self.success, Some(false))
+    }
+}
+
+/// Checks the component set of a definition or an edit: at most
+/// [`TEMPLATE_COMPONENTS_MAX`] components, one per kind, each valid.
+fn validate_component_set(components: &[TemplateDefinitionComponent]) -> Result<()> {
+    if components.len() > TEMPLATE_COMPONENTS_MAX {
+        return Err(Error::validation(
+            "template.components",
+            format!(
+                "at most {TEMPLATE_COMPONENTS_MAX} components are allowed, got {}",
+                components.len()
+            ),
+        ));
+    }
+    for (index, component) in components.iter().enumerate() {
+        if components[..index]
+            .iter()
+            .any(|other| other.kind() == component.kind())
+        {
+            return Err(Error::validation(
+                "template.components",
+                format!("duplicate {} component", component.kind()),
+            ));
+        }
+    }
+    for component in components {
+        component.validate()?;
+    }
+    Ok(())
+}
+
 /// Characters escaped in a query value.
 ///
 /// Everything outside RFC 3986's unreserved set is escaped, which keeps `-`,
@@ -1060,14 +3059,8 @@ const QUERY_VALUE_SET: &AsciiSet = &NON_ALPHANUMERIC
     .remove(b'_')
     .remove(b'~');
 
-fn require_max_bytes(field: &'static str, value: &str, max: usize) -> Result<()> {
-    if value.len() > max {
-        return Err(Error::validation(
-            field,
-            format!("must be at most {max} bytes, got {}", value.len()),
-        ));
-    }
-    Ok(())
+pub(crate) fn encode_query_value(value: &str) -> String {
+    utf8_percent_encode(value, QUERY_VALUE_SET).to_string()
 }
 
 #[cfg(test)]
@@ -1129,5 +3122,33 @@ mod tests {
         ));
         let json = template.render().unwrap();
         assert_eq!(json["components"][0]["parameters"][0]["type"], "text");
+    }
+
+    #[test]
+    fn only_text_examples_reach_the_wire() {
+        // `validate` rejects a non-text example, so this is the total render
+        // rule: values without a string form contribute nothing.
+        let examples = [
+            TemplateParameter::text("a"),
+            TemplateParameter::currency("$1", "USD", 1_000),
+            TemplateParameter::media(MediaRef::id("1"), TemplateMediaKind::Image),
+        ];
+        let values = example_values(&examples);
+        assert_eq!(values, vec!["a"]);
+    }
+
+    #[test]
+    fn the_definition_helpers_ignore_a_component_of_another_kind() {
+        // The builder helpers look the component up by kind, so a helper that
+        // meets the wrong variant must leave it untouched instead of panicking.
+        let mut footer = TemplateDefinitionComponent::footer_text("Fuß");
+        footer.set_header_text("Kopf".into());
+        footer.set_body_text("Text".into());
+        footer.push_button(TemplateButton::quick_reply("Ja"));
+        assert_eq!(footer, TemplateDefinitionComponent::footer_text("Fuß"));
+
+        let mut header = TemplateDefinitionComponent::header_text("{{1}}");
+        header.push_example(TemplateParameter::text("a"));
+        assert!(header.validate().is_ok());
     }
 }

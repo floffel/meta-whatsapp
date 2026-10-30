@@ -3115,7 +3115,7 @@ fn validate_optional_caption(field: &'static str, caption: Option<&str>) -> Resu
     }
 }
 
-fn require_non_empty(field: &'static str, value: &str) -> Result<()> {
+pub(crate) fn require_non_empty(field: &'static str, value: &str) -> Result<()> {
     if value.is_empty() {
         return Err(Error::validation(field, "must not be empty"));
     }
@@ -3129,7 +3129,7 @@ fn require_identifier(field: &'static str, value: &str) -> Result<()> {
     require_no_controls(field, value)
 }
 
-fn require_max_bytes(field: &'static str, value: &str, max: usize) -> Result<()> {
+pub(crate) fn require_max_bytes(field: &'static str, value: &str, max: usize) -> Result<()> {
     if value.len() > max {
         return Err(Error::validation(
             field,
@@ -3139,7 +3139,7 @@ fn require_max_bytes(field: &'static str, value: &str, max: usize) -> Result<()>
     Ok(())
 }
 
-fn require_max_chars(field: &'static str, value: &str, max: usize) -> Result<()> {
+pub(crate) fn require_max_chars(field: &'static str, value: &str, max: usize) -> Result<()> {
     let count = value.chars().count();
     if count > max {
         return Err(Error::validation(
