@@ -1,5 +1,5 @@
 //! Typed outbound messages: text, media, location, contacts, reactions,
-//! interactive (buttons/list/flow/catalog products) and templates.
+//! interactive (buttons/list/flow/address/catalog products) and templates.
 //!
 //! Every family is a plain struct with a constructor and chainable setters.
 //! [`MessageRequest::to_json`] validates before it renders, so a malformed
@@ -26,6 +26,7 @@
 
 use serde_json::{json, Map, Value};
 
+use crate::address::AddressMessage;
 use crate::error::{Error, Result};
 use crate::media::MediaRef;
 use crate::template::TemplateMessage;
@@ -343,7 +344,7 @@ pub enum MessageBody {
     Contacts(ContactsMessage),
     /// Emoji reaction to an inbound message.
     Reaction(ReactionMessage),
-    /// Buttons, list or flow.
+    /// Buttons, list, flow, address form or a catalog product message.
     Interactive(InteractiveMessage),
     /// Pre-approved template.
     Template(TemplateMessage),
@@ -1651,6 +1652,12 @@ impl From<FlowMessage> for MessageBody {
     }
 }
 
+impl From<AddressMessage> for MessageBody {
+    fn from(value: AddressMessage) -> Self {
+        Self::Interactive(InteractiveMessage::Address(value))
+    }
+}
+
 /// A text header on an interactive message.
 ///
 /// ```
@@ -1674,7 +1681,7 @@ impl HeaderText {
         Self { text: text.into() }
     }
 
-    fn validate(&self) -> Result<()> {
+    pub(crate) fn validate(&self) -> Result<()> {
         require_non_empty("interactive.header.text", &self.text)?;
         require_max_chars("interactive.header.text", &self.text, HEADER_MAX_CHARS)
     }
@@ -2944,7 +2951,8 @@ impl From<MultiProductMessage> for MessageBody {
     }
 }
 
-/// Any interactive message: buttons, list, flow or a catalog product message.
+/// Any interactive message: buttons, list, flow, an address form or a catalog
+/// product message.
 ///
 /// ```
 /// use meta_whatsapp::{InteractiveMessage, ListMessage, MessageRequest};
@@ -2963,6 +2971,8 @@ pub enum InteractiveMessage {
     List(ListMessage),
     /// `WhatsApp` Flow.
     Flow(FlowMessage),
+    /// Address form (`address_message`, documented for India).
+    Address(AddressMessage),
     /// One catalog product card.
     Product(SingleProductMessage),
     /// Up to 30 catalog products in up to 10 sections.
@@ -2970,8 +2980,8 @@ pub enum InteractiveMessage {
 }
 
 impl InteractiveMessage {
-    /// Which interactive kind this is (`button`, `list`, `flow`, `product`,
-    /// `product_list`).
+    /// Which interactive kind this is (`button`, `list`, `flow`,
+    /// `address_message`, `product`, `product_list`).
     ///
     /// ```
     /// use meta_whatsapp::{FlowAction, FlowMessage, InteractiveMessage};
@@ -2992,6 +3002,7 @@ impl InteractiveMessage {
             Self::Buttons(_) => "button",
             Self::List(_) => "list",
             Self::Flow(_) => "flow",
+            Self::Address(_) => "address_message",
             Self::Product(_) => "product",
             Self::ProductList(_) => "product_list",
         }
@@ -3017,6 +3028,7 @@ impl InteractiveMessage {
             Self::Buttons(message) => message.validate(),
             Self::List(message) => message.validate(),
             Self::Flow(message) => message.validate(),
+            Self::Address(message) => message.validate(),
             Self::Product(message) => message.validate(),
             Self::ProductList(message) => message.validate(),
         }
@@ -3027,6 +3039,7 @@ impl InteractiveMessage {
             Self::Buttons(message) => message.render(),
             Self::List(message) => message.render(),
             Self::Flow(message) => message.render(),
+            Self::Address(message) => message.render(),
             Self::Product(message) => message.render(),
             Self::ProductList(message) => message.render(),
         }
@@ -3048,6 +3061,12 @@ impl From<ListMessage> for InteractiveMessage {
 impl From<FlowMessage> for InteractiveMessage {
     fn from(value: FlowMessage) -> Self {
         Self::Flow(value)
+    }
+}
+
+impl From<AddressMessage> for InteractiveMessage {
+    fn from(value: AddressMessage) -> Self {
+        Self::Address(value)
     }
 }
 
@@ -3083,7 +3102,7 @@ fn validate_optional_caption(field: &'static str, caption: Option<&str>) -> Resu
     }
 }
 
-fn require_non_empty(field: &'static str, value: &str) -> Result<()> {
+pub(crate) fn require_non_empty(field: &'static str, value: &str) -> Result<()> {
     if value.is_empty() {
         return Err(Error::validation(field, "must not be empty"));
     }
@@ -3097,7 +3116,7 @@ fn require_identifier(field: &'static str, value: &str) -> Result<()> {
     require_no_controls(field, value)
 }
 
-fn require_max_bytes(field: &'static str, value: &str, max: usize) -> Result<()> {
+pub(crate) fn require_max_bytes(field: &'static str, value: &str, max: usize) -> Result<()> {
     if value.len() > max {
         return Err(Error::validation(
             field,
@@ -3107,7 +3126,7 @@ fn require_max_bytes(field: &'static str, value: &str, max: usize) -> Result<()>
     Ok(())
 }
 
-fn require_max_chars(field: &'static str, value: &str, max: usize) -> Result<()> {
+pub(crate) fn require_max_chars(field: &'static str, value: &str, max: usize) -> Result<()> {
     let count = value.chars().count();
     if count > max {
         return Err(Error::validation(
@@ -3118,7 +3137,7 @@ fn require_max_chars(field: &'static str, value: &str, max: usize) -> Result<()>
     Ok(())
 }
 
-fn require_no_controls(field: &'static str, value: &str) -> Result<()> {
+pub(crate) fn require_no_controls(field: &'static str, value: &str) -> Result<()> {
     if value.chars().any(char::is_control) {
         return Err(Error::validation(
             field,

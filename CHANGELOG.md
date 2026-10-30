@@ -10,6 +10,23 @@ of the README.
 ## [Unreleased]
 
 ### Added
+- Address messages: `AddressMessage` renders Meta's `address_message`
+  interactive form (`header`, `body`, `footer` and the action parameters
+  `country`, `values`, `saved_addresses`, `validation_errors`), validated before
+  the request is built — a two-letter ISO 3166-1 `country`, a non-empty body,
+  `in_pin_code` ≤ 6 characters, every other value ≤ 1024 UTF-8 bytes, unique
+  saved-address ids and at most one validation error per field.
+  `AddressValues` carries the eleven documented fields under their wire names
+  (`in_pin_code` is the postal code, `address` the street line); unknown keys
+  survive in `extra`. `InteractiveMessage::Address`, `From<AddressMessage> for
+  MessageBody`, and a new `address` module with `AddressReply`, which decodes
+  the `nfm_reply.response_json` string of a submitted address. Closes #22.
+- Tests: the exact JSON body for a full and a minimal form, one boundary pair
+  per limit (country length, body bytes, field bytes, pin-code characters,
+  phone digits, header/footer, id and message lengths), the documented webhook
+  payload, property tests for the byte limits and the wire round-trip, and an
+  `address_message` seed for the existing `webhook_payload` fuzz target, which
+  now decodes every `nfm_reply` it meets.
 - Catalog product messages (#19): `SingleProductMessage` (`interactive.type`
   `product`) and `MultiProductMessage` (`product_list`) with `ProductSection` and
   `ProductItem`, plus the matching `InteractiveMessage::Product` /
@@ -84,7 +101,6 @@ of the README.
   `tests/client.rs` (a 3600 s hint is slept for exactly 3600 s of paused time;
   3601 s against a 3600 s ceiling is not slept at all) and by two new properties
   in `tests/properties.rs`.
-
 ## [0.1.5] - 2026-10-27
 
 ### Changed

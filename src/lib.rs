@@ -1,16 +1,19 @@
 //! Typed client and webhook toolkit for the
 //! [WhatsApp Cloud API](https://developers.facebook.com/docs/whatsapp/cloud-api).
 //!
-//! Three independent parts:
+//! Four independent parts:
 //!
 //! * [`webhook`] — verify `X-Hub-Signature-256` in constant time, enforce a
 //!   replay window, and parse the payload into types (message events, status
 //!   events, and unknown future events).
 //! * [`client`] — send every message family (text, media, location, contacts,
-//!   reaction, interactive buttons/list/flow/catalog products, templates),
-//!   upload/download/delete media, list templates, and administer the account
-//!   (business profile, phone-number quality and limits, register/deregister
-//!   and the two-step verification PIN, blocklist, webhook subscriptions).
+//!   reaction, interactive buttons/list/flow/address/catalog products,
+//!   templates), upload/download/delete media, list templates, and administer
+//!   the account (business profile, phone-number quality and limits,
+//!   register/deregister and the two-step verification PIN, blocklist, webhook
+//!   subscriptions).
+//! * [`address`] — the `address_message` form and the typed reply a customer
+//!   sends back.
 //! * [`business`], [`subscription`], [`usage`] — the typed shapes behind that
 //!   administration surface, including Meta's `X-Business-Use-Case-Usage`
 //!   budget header.
@@ -89,6 +92,7 @@
 // `WhatsApp`, `OpenAPI` and `Graph API` are proper nouns, not identifiers.
 #![allow(clippy::doc_markdown)]
 
+pub mod address;
 pub mod business;
 pub mod client;
 pub mod error;
@@ -102,6 +106,10 @@ pub mod types;
 pub mod usage;
 pub mod webhook;
 
+pub use address::{
+    AddressMessage, AddressReply, AddressValidationError, AddressValues, SavedAddress,
+    ADDRESS_COUNTRY_LEN, ADDRESS_FIELD_MAX_BYTES, ADDRESS_PIN_CODE_MAX_CHARS,
+};
 pub use business::{
     BlockChange, BlockOutcome, BlockedUser, BlockedUsersPage, BusinessProfile,
     BusinessProfileUpdate, MessagingLimitTier, PhoneNumberInfo, RegisterRequest,

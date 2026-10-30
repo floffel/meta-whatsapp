@@ -8,7 +8,7 @@
 
 use libfuzzer_sys::fuzz_target;
 
-use meta_whatsapp::{ChangeValue, WebhookPayload};
+use meta_whatsapp::{AddressReply, ChangeValue, WebhookPayload};
 
 fuzz_target!(|data: &[u8]| {
     let Ok(value) = serde_json::from_slice::<serde_json::Value>(data) else {
@@ -44,6 +44,13 @@ fuzz_target!(|data: &[u8]| {
         let _ = message.media();
         let _ = message.text_body();
         let _ = message.timestamp_secs();
+        // An address reply is a JSON *string* inside `nfm_reply`: decoding it
+        // must be total for any content, and must not lose modelled fields.
+        if let Some(Ok(reply)) = AddressReply::from_message(message) {
+            let _ = reply.saved_address_id.as_deref();
+            let _ = reply.values.get("city");
+            let _ = reply.values.is_empty();
+        }
     }
     for status in payload.statuses() {
         let _ = status.timestamp_secs();
