@@ -56,13 +56,18 @@ Sending a message is **not** safely repeatable: the Cloud API has no idempotency
 key, so a second POST is a second message on the recipient's phone. The client
 therefore automates only the retries that cannot duplicate anything:
 
-| Failure | Non-idempotent (`POST` send/upload) | Idempotent (`GET`, `DELETE`) |
+| Failure | Non-idempotent (`POST` send/upload/register, `deregister`) | Idempotent (`GET`, other `DELETE`) |
 | --- | --- | --- |
 | 429 rate limited | retried, honours `Retry-After` | retried, honours `Retry-After` |
 | DNS / connect / TLS failure (before the write) | retried | retried |
 | 5xx | **not retried** → `Error::Ambiguous` | retried with backoff |
 | Timeout or reset after the write | **not retried** → `Error::Ambiguous` | retried |
 | Other 4xx | terminal | terminal |
+
+`deregister` is the one `DELETE` in the table's left column: deregistering twice is a
+state change the caller has to see, so it overrides the verb rule
+(`Repeatability::of_method`) and is treated as non-idempotent, exactly like
+`register` and `set_two_step_verification_pin`.
 
 `Error::Ambiguous` means *the message may or may not have been delivered*:
 `is_retryable()` is `false`, `is_ambiguous()` is `true`, `status()` carries the
@@ -139,11 +144,21 @@ Account administration for the number the client is bound to:
 | --- | --- | --- |
 | `business_profile` | `GET /{phone_number_id}/whatsapp_business_profile` | `BusinessProfile` (about, address, description, e-mail, websites, vertical) |
 | `update_business_profile` | `POST /{phone_number_id}/whatsapp_business_profile` | `{"success": true}` |
+| `register` | `POST /{phone_number_id}/register` | `SuccessOutcome` (`{"success": true}`) — a number cannot send until this succeeds |
+| `register_with_backup` | same, plus `backup{password,data}` | same, migrating an on-premises account in the same call |
+| `deregister` | `DELETE /{phone_number_id}/deregister` | `SuccessOutcome` |
+| `set_two_step_verification_pin` | `POST /{phone_number_id}` (body `pin` only) | `SuccessOutcome` — the only spelling; the API cannot disable two-step verification |
 | `phone_number_info` | `GET /{phone_number_id}?fields=…` | `PhoneNumberInfo` (quality rating, messaging-limit tier, account mode, display-name and 2FA status) |
 | `phone_number_info_with` | same, explicit field list | same, but you choose the fields |
 | `blocked_users` | `GET /{phone_number_id}/block_users` | `BlockedUsersPage` (with paging) |
 | `block_users` | `POST /{phone_number_id}/block_users` | `BlockOutcome` (`added_users`) |
 | `unblock_users` | `DELETE /{phone_number_id}/block_users` (ids in the body) | `BlockOutcome` (`removed_users`) |
+
+The three lifecycle writes take or return a `VerificationPin`: a value that only
+exists if it is exactly six ASCII digits, is `Debug`- and `Display`-redacted, has
+no getter and no `Default`, and never appears in an error message. They are
+non-idempotent — a 5xx or a lost answer is `Error::Ambiguous`, never a silent
+re-send (see *Delivery semantics*).
 
 Quality and limits are typed but permissive: `QualityRating` (GREEN/YELLOW/RED/NA)
 and `MessagingLimitTier` (TIER_50 … TIER_UNLIMITED) keep an unknown value as
@@ -236,6 +251,13 @@ to need a patch release — `docs/contracts.md` records the sources:
   counters are ignored, not typed.
 * **Blocklist batch size.** No documented maximum, so none is enforced beyond the
   per-number validation.
+* **`success` on the lifecycle calls.** The reference types it as a boolean, but the
+  field is also seen as `1`/`0`, as `"true"`/`"1"`, or absent. `SuccessOutcome`
+  accepts every one of those and reads a missing flag as `false`; only a body that
+  cannot be an object at all is an error.
+* **`backup{password,data}` on register.** The migration blob for an on-premises
+  Business API move; the OpenAPI description does not pin the shape down, so both
+  parts are opaque strings here and the caller supplies whatever its export produced.
 
 ## Tracked gaps
 
@@ -252,8 +274,10 @@ this section when its issue closes.
 * **App-level webhook field subscription** (`/{app_id}/subscriptions`) and
   registering the callback URL itself — issue #9.
 * **WABA-level phone-number listing / onboarding** (`GET|POST /{waba_id}/phone_numbers`,
-  `register`, `request_code`) — issue #9. The per-number quality and limits
-  *are* covered above.
+  its `register`, `request_code`) — issue #9. The per-number quality and limits *and*
+  the per-number lifecycle (register / deregister / two-step PIN) *are* covered above;
+  what is left is enumerating and onboarding numbers from the WABA node, where the
+  code request has no per-number PIN.
 
 The only exclusion that does not need an issue is a surface the provider does
 not offer, or has deprecated — and then the README says which, with a link.
