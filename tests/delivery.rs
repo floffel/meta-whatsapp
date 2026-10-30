@@ -127,7 +127,24 @@ async fn the_retry_after_header_sets_the_wait() {
         ),
         Action::Retry(Duration::from_secs(2))
     );
-    // Clamped to the ceiling, so a hostile hint cannot park the caller.
+    // At the ceiling the wait is still exact…
+    assert_eq!(
+        policy.delay(1, Some(policy.max_delay)),
+        Some(policy.max_delay)
+    );
+    // …and one nanosecond above it is not waited at all. A shorter wait than
+    // the server asked for would only earn a second 429 and burn an attempt, so
+    // the hint is surfaced intact instead.
+    assert_eq!(
+        policy.decide(
+            Attempt::RateLimited {
+                retry_after: Some(policy.max_delay + Duration::from_nanos(1))
+            },
+            Repeatability::NotIdempotent,
+            1
+        ),
+        Action::Surface
+    );
     assert_eq!(
         policy.decide(
             Attempt::RateLimited {
@@ -136,7 +153,36 @@ async fn the_retry_after_header_sets_the_wait() {
             Repeatability::NotIdempotent,
             1
         ),
-        Action::Retry(policy.max_delay)
+        Action::Surface
+    );
+}
+
+/// The 429 that carries an unusable hint reaches the caller unchanged and only
+/// once: the wait the server asked for stays in `retry_after()`, so the caller
+/// can schedule it, and the error stays `is_retryable()`.
+#[tokio::test]
+async fn a_429_above_the_ceiling_is_surfaced_after_one_call() {
+    let transport = MockTransport::new();
+    for _ in 0..3 {
+        transport.push_response(response(
+            429,
+            &[("Retry-After", "3600")],
+            b"{\"error\":{\"code\":4,\"message\":\"rate limited\"}}",
+        ));
+    }
+    // `instant_retry` has a zero-length ceiling, so a 3600 s hint cannot fit.
+    let client = client(transport.clone()).with_retry(instant_retry(3));
+
+    let err = client.send_text("1", "hi").await.unwrap_err();
+
+    assert_eq!(transport.call_count(), 1, "a surfaced hint is not re-sent");
+    assert!(err.is_retryable(), "{err:?}");
+    assert!(!err.is_ambiguous(), "{err:?}");
+    assert_eq!(err.status(), Some(429));
+    assert_eq!(
+        err.retry_after(),
+        Some(Duration::from_secs(3600)),
+        "the hint must survive verbatim"
     );
 }
 

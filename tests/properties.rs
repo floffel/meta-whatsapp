@@ -226,6 +226,70 @@ proptest! {
         }
     }
 
+    /// A hint that fits under the ceiling is waited out verbatim: the server's
+    /// schedule wins over the curve in both directions.
+    #[test]
+    fn a_retry_after_within_the_ceiling_is_waited_verbatim(
+        attempts in 1_u32..10,
+        hint_ms in 0_u64..5_000,
+        max_ms in 0_u64..5_000,
+        base_ms in 0_u64..500,
+        failed in 0_u32..12,
+    ) {
+        let ceiling = max_ms.max(hint_ms);
+        let policy = RetryPolicy::new(attempts)
+            .with_base_delay(Duration::from_millis(base_ms))
+            .with_max_delay(Duration::from_millis(ceiling));
+        let hint = Duration::from_millis(hint_ms);
+
+        if failed < attempts.max(1) {
+            prop_assert_eq!(policy.delay(failed, Some(hint)), Some(hint));
+        }
+    }
+
+    /// A hint above the ceiling never produces a wait — and never a shorter one.
+    /// The 429 surfaces with the hint intact; a 5xx on a send keeps its own
+    /// rule (`Ambiguous`), hint or not.
+    #[test]
+    fn a_retry_after_above_the_ceiling_never_waits(
+        max_ms in 0_u64..5_000,
+        over_ms in 1_u64..86_400_000,
+        attempts in 0_u32..10,
+        failed in 0_u32..12,
+        status in prop_oneof![Just(429_u16), 500_u16..600],
+        repeatability in prop_oneof![
+            Just(Repeatability::Idempotent),
+            Just(Repeatability::NotIdempotent)
+        ],
+    ) {
+        let policy = RetryPolicy::new(attempts).with_max_delay(Duration::from_millis(max_ms));
+        let hint = Duration::from_millis(max_ms.saturating_add(over_ms));
+        prop_assert!(
+            hint > policy.max_delay,
+            "the case must actually be over the ceiling"
+        );
+
+        let attempt = if status == 429 {
+            Attempt::RateLimited {
+                retry_after: Some(hint),
+            }
+        } else {
+            Attempt::ServerError {
+                retry_after: Some(hint),
+            }
+        };
+        let action = policy.decide(attempt, repeatability, failed);
+
+        prop_assert!(
+            !matches!(action, Action::Retry(_)),
+            "waited {action:?} for a {hint:?} hint above a {:?} ceiling",
+            policy.max_delay
+        );
+        if status == 429 || repeatability.is_idempotent() {
+            prop_assert_eq!(action, Action::Surface);
+        }
+    }
+
     /// Classification is total and only depends on the status and phase.
     #[test]
     fn attempt_classification_is_total(status in any::<u16>(), after_write in any::<bool>()) {

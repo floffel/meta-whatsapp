@@ -49,6 +49,21 @@ of the README.
   `password`, `backup`, `token`, `access_token`, `verify_token` or `app_secret`,
   recursively. A transport can log a whole request without leaking a PIN.
 
+### Fixed
+- `Retry-After` is no longer shortened to `max_delay` (#14). The hint is the
+  server's own schedule: `RetryPolicy::delay` now waits it out verbatim while it
+  fits under `max_delay`, and a longer hint answers `Action::Surface` instead of
+  a truncated wait. The caller sees the 429 with `retry_after()` intact and
+  `is_retryable() == true`, so it can schedule the wait the server asked for;
+  waiting less used to guarantee a second 429 and burn one of the attempts.
+  `max_delay` now decides *whether* a hint is acceptable, never how much of it
+  to wait — the backoff curve is still clamped by it, and
+  `without_retry_after()` still hands the decision to the curve. The boundary is
+  pinned to the nanosecond in `src/retry.rs`, `tests/delivery.rs`,
+  `tests/client.rs` (a 3600 s hint is slept for exactly 3600 s of paused time;
+  3601 s against a 3600 s ceiling is not slept at all) and by two new properties
+  in `tests/properties.rs`.
+
 ## [0.1.5] - 2026-10-27
 
 ### Changed
