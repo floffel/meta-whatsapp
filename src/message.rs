@@ -2214,13 +2214,45 @@ impl FlowAction {
             data: None,
         }
     }
+    /// A `navigate` action for `screen` that pre-fills it with `data`.
+    ///
+    /// `data` must be a JSON object; anything else is rejected by
+    /// [`FlowMessage::validate`] instead of being sent.
+    ///
+    /// ```
+    /// use meta_whatsapp::{FlowAction, FlowMessage};
+    ///
+    /// let action = FlowAction::navigate_with_data("CART", serde_json::json!({"cart_id": "c-1"}));
+    /// assert!(FlowMessage::new("f", "open", action).validate().is_ok());
+    ///
+    /// let wrong = FlowAction::navigate_with_data("CART", serde_json::json!(["c-1"]));
+    /// assert!(FlowMessage::new("f", "open", wrong).validate().is_err());
+    /// ```
+    #[must_use]
+    pub fn navigate_with_data(screen: impl Into<String>, data: Value) -> Self {
+        Self::Navigate {
+            screen: screen.into(),
+            data: Some(data),
+        }
+    }
 
     fn validate(&self) -> Result<()> {
         match self {
-            Self::Navigate { screen, .. } => require_non_empty(
-                "interactive.action.parameters.flow_action_payload.screen",
-                screen,
-            ),
+            Self::Navigate { screen, data } => {
+                require_non_empty(
+                    "interactive.action.parameters.flow_action_payload.screen",
+                    screen,
+                )?;
+                if let Some(data) = data {
+                    if !data.is_object() {
+                        return Err(Error::validation(
+                            "interactive.action.parameters.flow_action_payload.data",
+                            "must be a JSON object",
+                        ));
+                    }
+                }
+                Ok(())
+            }
             Self::DataExchange => Ok(()),
         }
     }
