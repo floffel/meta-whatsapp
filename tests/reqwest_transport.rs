@@ -154,7 +154,7 @@ async fn an_empty_response_body_at_a_zero_limit_is_accepted() {
         .execute(Request::get(&format!("{base}/messages"), "t"))
         .await
         .unwrap();
-    assert!(response.body().is_empty());
+    assert_eq!(response.body().len(), 0);
 }
 
 #[tokio::test]

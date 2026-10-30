@@ -741,7 +741,7 @@ mod tests {
         let mut empty = Vec::new();
         assert!(append_chunk(&mut empty, b"", 0).is_ok());
         assert!(append_chunk(&mut empty, b"x", 0).is_err());
-        assert!(empty.is_empty());
+        assert_eq!(empty, Vec::<u8>::new());
     }
 
     #[test]

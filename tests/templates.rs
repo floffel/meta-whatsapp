@@ -1099,7 +1099,7 @@ async fn list_templates_still_hits_the_waba_path() {
         .list_templates(&TemplateQuery::new("102290129340398").limit(2))
         .await
         .unwrap();
-    assert!(page.data.is_empty());
+    assert_eq!(page.data.len(), 0);
     assert!(transport
         .only_call()
         .url
