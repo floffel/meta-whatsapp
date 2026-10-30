@@ -344,7 +344,7 @@ pub enum MessageBody {
     Contacts(ContactsMessage),
     /// Emoji reaction to an inbound message.
     Reaction(ReactionMessage),
-    /// Buttons, list or flow.
+    /// Buttons, list, flow, address form or a catalog product message.
     Interactive(InteractiveMessage),
     /// Pre-approved template.
     Template(TemplateMessage),
@@ -2951,7 +2951,8 @@ impl From<MultiProductMessage> for MessageBody {
     }
 }
 
-/// Any interactive message: buttons, list, flow or a catalog product message.
+/// Any interactive message: buttons, list, flow, an address form or a catalog
+/// product message.
 ///
 /// ```
 /// use meta_whatsapp::{InteractiveMessage, ListMessage, MessageRequest};
