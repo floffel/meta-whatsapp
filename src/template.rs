@@ -2380,7 +2380,7 @@ pub(crate) fn validate_template_owner_id(id: &str) -> Result<()> {
 /// `AUTHENTICATION` template, a media header only with an uploaded handle) are
 /// Meta's, not local checks: what this crate rejects is what would be malformed
 /// on the wire, so a well-formed definition that Meta dislikes fails with
-/// [`Error::Api`](crate::Error::Api) and a message.
+/// [`Error::Api`] and a message.
 ///
 /// ```
 /// use meta_whatsapp::{TemplateButton, TemplateCategory, TemplateDefinition};
