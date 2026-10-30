@@ -311,9 +311,12 @@ A Cloud API surface this crate does not implement is an issue, not an exclusion.
 The list below is the shortcut; the issue is the contract, and an entry leaves
 this section when its issue closes.
 
-* **Flow data-exchange endpoints** — issue #8. Until then the inbound
-  `nfm_reply` payload is passed through raw (`InteractiveReply::nfm_reply`);
-  decrypting and serving flows is a server concern, not a client one.
+* **Flow API beyond the message pair** — issue #26: asset upload, the
+  data-exchange encryption endpoints and the flow preview/get endpoints. The
+  message pair itself is complete: outbound `FlowMessage`, and inbound typed
+  `FlowReply` whose `response_json` decodes through `FlowReply::response` into
+  a `FlowResponse` (`flow_token`, `get`, `field`). Decrypting and serving flows
+  stays a server concern, not a client one.
 * **App-level webhook field subscription** (`/{app_id}/subscriptions`) and
   registering the callback URL itself — issue #9.
 * **WABA-level phone-number listing / onboarding** (`GET|POST /{waba_id}/phone_numbers`,

@@ -132,6 +132,8 @@ pub use template::{
 pub use transport::Transport;
 #[cfg(feature = "http")]
 pub use transport::{ReqwestTransport, DEFAULT_MAX_RESPONSE_BYTES};
-pub use types::{Change, ChangeValue, Entry, Message, Status, WebhookPayload};
+pub use types::{
+    Change, ChangeValue, Entry, FlowReply, FlowResponse, Message, Status, WebhookPayload,
+};
 pub use usage::{BusinessUseCaseUsage, UseCaseUsage};
 pub use webhook::WebhookVerifier;

@@ -27,6 +27,18 @@ of the README.
 - Permissive inbound order parsing on `Message::order()`, including camelCase
   aliases and numeric strings, and address replies on `Message::address()` for
   both `interactive.address_message` and top-level `address` payloads.
+- Typed inbound flow replies. `InteractiveReply::nfm_reply` was an untyped
+  `serde_json::Value`; it is now a `FlowReply` (`name`, `body`, `response_json`,
+  plus `extra` for members Meta adds later) reachable through
+  `Message::flow_reply()`. The flow's answers arrive JSON-encoded in a string,
+  so `FlowReply::response()` decodes them into a `FlowResponse` with
+  `flow_token()`, `get()` and `field()`; a missing or malformed
+  `response_json` is `Error::Payload` and the raw string stays on the struct.
+  Breaking for anyone who read the untyped object. Closes #8.
+- `FlowAction::navigate_with_data` and a validation for
+  `flow_action_payload.data`: a non-object payload is now `Error::Validation`
+  instead of being rendered and sent. Closes #8 together with the typed reply
+  above.
 - `tests/commerce.rs` covers every wire shape and both sides of every limit;
   the existing `webhook_payload` fuzz target exercises the inbound parsers.
   Closes #7, #19, #20 and #21.
