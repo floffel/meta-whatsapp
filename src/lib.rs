@@ -7,9 +7,10 @@
 //!   replay window, and parse the payload into types (message events, status
 //!   events, and unknown future events).
 //! * [`client`] — send every message family (text, media, location, contacts,
-//!   reaction, interactive buttons/list/flow/address, templates),
-//!   upload/download/delete media, list templates, and administer the account
-//!   (business profile, phone-number quality and limits, blocklist, webhook
+//!   reaction, interactive buttons/list/flow/address/catalog products,
+//!   templates), upload/download/delete media, list templates, and administer
+//!   the account (business profile, phone-number quality and limits,
+//!   register/deregister and the two-step verification PIN, blocklist, webhook
 //!   subscriptions).
 //! * [`address`] — the `address_message` form and the typed reply a customer
 //!   sends back.
@@ -75,6 +76,11 @@
 //! * `#![forbid(unsafe_code)]`.
 //! * Secrets never reach `Debug`: [`WhatsAppClient`] and [`WebhookVerifier`]
 //!   redact them.
+//! * A registration / two-step verification PIN is validated to exactly six
+//!   ASCII digits before anything is built or sent, redacts itself in `Debug`
+//!   and `Display`, and never appears in an error message. `transport::Request`
+//!   redacts its token and secret body fields too, so a transport may log a
+//!   whole request.
 //! * Signature comparison is constant time; an empty app secret is refused.
 //! * Media ids, WABA ids, field lists and blocklist numbers are validated before
 //!   they become URL path segments or query values.
@@ -106,7 +112,9 @@ pub use address::{
 };
 pub use business::{
     BlockChange, BlockOutcome, BlockedUser, BlockedUsersPage, BusinessProfile,
-    BusinessProfileUpdate, MessagingLimitTier, PhoneNumberInfo, QualityRating,
+    BusinessProfileUpdate, MessagingLimitTier, PhoneNumberInfo, RegisterRequest,
+    RegistrationBackup, SuccessOutcome, TwoStepVerificationRequest, VerificationPin,
+    VERIFICATION_PIN_LEN,
 };
 pub use client::{SendOutcome, WhatsAppClient, DEFAULT_API_VERSION};
 pub use error::{Error, Result, TransportPhase};
@@ -115,8 +123,9 @@ pub use message::{
     AudioMessage, ButtonMessage, ContactCard, ContactEmail, ContactName, ContactOrg, ContactPhone,
     ContactsMessage, DocumentMessage, EmailType, FlowAction, FlowMessage, FlowMode, HeaderText,
     ImageMessage, InteractiveMessage, ListMessage, ListRow, ListSection, LocationMessage,
-    MessageBody, MessageRequest, PhoneType, ReactionMessage, RecipientType, ReplyButton,
-    StickerMessage, TextMessage, UrlType, VideoMessage,
+    MessageBody, MessageRequest, MultiProductMessage, PhoneType, ProductItem, ProductSection,
+    ReactionMessage, RecipientType, ReplyButton, SingleProductMessage, StickerMessage, TextMessage,
+    UrlType, VideoMessage,
 };
 pub use retry::{Action, Attempt, Repeatability, RetryPolicy};
 pub use subscription::{

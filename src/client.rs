@@ -1,4 +1,11 @@
-//! Graph API client: send messages, move media, list templates.
+//! Graph API client: send messages, move media, list templates, and run the
+//! phone-number lifecycle — register, deregister, two-step verification PIN.
+//!
+//! A number that has never been registered cannot send anything, so
+//! [`WhatsAppClient::register`] belongs next to [`WhatsAppClient::send`]. All
+//! three lifecycle writes are non-idempotent: a 5xx or a lost answer comes back
+//! as [`Error::Ambiguous`] and is never re-sent. Two-step verification cannot
+//! be disabled through the API, only re-set with a new PIN.
 //!
 //! The client owns no I/O of its own — everything goes through
 //! [`Transport`], which makes it testable against a recording mock and lets you
@@ -34,7 +41,8 @@ use serde_json::{json, Value};
 
 use crate::business::{
     block_users_payload, validate_field_list, BlockOutcome, BlockedUsersPage, BusinessProfile,
-    BusinessProfileUpdate, PhoneNumberInfo, PHONE_NUMBER_FIELDS,
+    BusinessProfileUpdate, PhoneNumberInfo, RegisterRequest, RegistrationBackup, SuccessOutcome,
+    TwoStepVerificationRequest, VerificationPin, PHONE_NUMBER_FIELDS,
 };
 use crate::error::{Error, Result};
 use crate::media::{parse_retry_after, validate_media_id, MediaBytes, MediaInfo, MediaUpload};
@@ -179,7 +187,8 @@ impl<T: Transport> WhatsAppClient<T> {
     }
 
     /// Replaces the retry policy (default: three attempts, 250 ms doubling to
-    /// an 8 s ceiling, `Retry-After` honoured).
+    /// an 8 s ceiling, `Retry-After` waited out verbatim while it fits under
+    /// that ceiling and surfaced otherwise).
     ///
     /// ```
     /// use meta_whatsapp::RetryPolicy;
@@ -738,6 +747,69 @@ impl<T: Transport> WhatsAppClient<T> {
         self.url(&format!("{}/block_users", self.phone_number_id))
     }
 
+    /// The register edge of the bound phone number.
+    ///
+    /// ```
+    /// # use meta_whatsapp::{Result, Transport, WhatsAppClient, transport::{Request, Response}};
+    /// # struct Mock;
+    /// # impl Transport for Mock {
+    /// #     async fn execute(&self, _: Request<'_>) -> Result<Response> {
+    /// #         Ok(Response::new(200, std::iter::empty(), b"{}".to_vec()))
+    /// #     }
+    /// # }
+    /// assert!(WhatsAppClient::new("106540352242922", "t", Mock)
+    ///     .register_url()
+    ///     .ends_with("/v21.0/106540352242922/register"));
+    /// ```
+    #[must_use]
+    pub fn register_url(&self) -> String {
+        self.url(&format!("{}/register", self.phone_number_id))
+    }
+
+    /// The deregister edge of the bound phone number.
+    ///
+    /// ```
+    /// # use meta_whatsapp::{Result, Transport, WhatsAppClient, transport::{Request, Response}};
+    /// # struct Mock;
+    /// # impl Transport for Mock {
+    /// #     async fn execute(&self, _: Request<'_>) -> Result<Response> {
+    /// #         Ok(Response::new(200, std::iter::empty(), b"{}".to_vec()))
+    /// #     }
+    /// # }
+    /// assert!(WhatsAppClient::new("106540352242922", "t", Mock)
+    ///     .deregister_url()
+    ///     .ends_with("/v21.0/106540352242922/deregister"));
+    /// ```
+    #[must_use]
+    pub fn deregister_url(&self) -> String {
+        self.url(&format!("{}/deregister", self.phone_number_id))
+    }
+
+    /// Where the two-step verification PIN is set: the phone-number node
+    /// itself, not a sub-edge.
+    ///
+    /// Same URL as [`WhatsAppClient::phone_number_url`], because the reference
+    /// asks for `POST /{PHONE_NUMBER_ID}` with a `pin` field.
+    ///
+    /// ```
+    /// # use meta_whatsapp::{Result, Transport, WhatsAppClient, transport::{Request, Response}};
+    /// # struct Mock;
+    /// # impl Transport for Mock {
+    /// #     async fn execute(&self, _: Request<'_>) -> Result<Response> {
+    /// #         Ok(Response::new(200, std::iter::empty(), b"{}".to_vec()))
+    /// #     }
+    /// # }
+    /// let client = WhatsAppClient::new("106540352242922", "t", Mock);
+    /// assert!(client
+    ///     .two_step_verification_url()
+    ///     .ends_with("/v21.0/106540352242922"));
+    /// assert_eq!(client.two_step_verification_url(), client.phone_number_url());
+    /// ```
+    #[must_use]
+    pub fn two_step_verification_url(&self) -> String {
+        self.phone_number_url()
+    }
+
     /// The webhook-subscription endpoint of a business account.
     ///
     /// ```
@@ -1015,6 +1087,196 @@ impl<T: Transport> WhatsAppClient<T> {
         BlockOutcome::from_value(&response.json()?)
     }
 
+    /// Registers the bound phone number with WhatsApp.
+    ///
+    /// A freshly provisioned number is *not* usable until this succeeds: every
+    /// send comes back with error code 131026 ("not a registered WhatsApp
+    /// account"). `pin` is the six-digit PIN you chose for the number, and it
+    /// is validated before anything is allocated or sent.
+    ///
+    /// This is a non-idempotent write: a 5xx or a response lost after the
+    /// request was written comes back as [`Error::Ambiguous`] and is never
+    /// re-sent. Check [`WhatsAppClient::phone_number_info`] to see whether the
+    /// number ended up registered before trying again.
+    ///
+    /// ```
+    /// # use meta_whatsapp::{Result, Transport, VerificationPin, WhatsAppClient, transport::{Request, Response}};
+    /// # struct Mock;
+    /// # impl Transport for Mock {
+    /// #     async fn execute(&self, request: Request<'_>) -> Result<Response> {
+    /// #         assert!(request.url.ends_with("/register"));
+    /// #         assert_eq!(request.method.as_str(), "POST");
+    /// #         assert_eq!(request.body_json().unwrap()["messaging_product"], "whatsapp");
+    /// #         Ok(Response::new(200, std::iter::empty(), br#"{"success":true}"#.to_vec()))
+    /// #     }
+    /// # }
+    /// # async fn demo() -> Result<()> {
+    /// let client = WhatsAppClient::new("1", "t", Mock);
+    /// let outcome = client.register(&VerificationPin::new("123456")?).await?;
+    /// assert!(outcome.success);
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] when the PIN is not exactly six ASCII digits — in
+    /// that case nothing is sent; then transport and Graph API errors, with a
+    /// 5xx surfacing as [`Error::Ambiguous`].
+    pub async fn register(&self, pin: &VerificationPin) -> Result<SuccessOutcome> {
+        self.register_inner(pin, None).await
+    }
+
+    /// Registers the bound number and migrates an on-premises account backup
+    /// in the same call.
+    ///
+    /// The `backup` object (`{"password": …, "data": …}`) is only meaningful
+    /// when moving a number from an on-premises Business API installation; see
+    /// [`RegistrationBackup`], whose shape the OpenAPI description does not
+    /// pin down. Both the PIN and the backup password stay out of `Debug` and
+    /// out of every error message.
+    ///
+    /// ```
+    /// # use meta_whatsapp::{Result, RegistrationBackup, Transport, VerificationPin, WhatsAppClient, transport::{Request, Response}};
+    /// # struct Mock;
+    /// # impl Transport for Mock {
+    /// #     async fn execute(&self, request: Request<'_>) -> Result<Response> {
+    /// #         let body = request.body_json().unwrap();
+    /// #         assert_eq!(body["backup"]["data"], "BASE64BLOB");
+    /// #         Ok(Response::new(200, std::iter::empty(), br#"{"success":true}"#.to_vec()))
+    /// #     }
+    /// # }
+    /// # async fn demo() -> Result<()> {
+    /// let client = WhatsAppClient::new("1", "t", Mock);
+    /// let backup = RegistrationBackup::new("backup-password", "BASE64BLOB")?;
+    /// let outcome = client
+    ///     .register_with_backup(&VerificationPin::new("123456")?, &backup)
+    ///     .await?;
+    /// assert!(outcome.success);
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for a malformed PIN or an empty backup part; then
+    /// transport and Graph API errors, with a 5xx surfacing as
+    /// [`Error::Ambiguous`].
+    pub async fn register_with_backup(
+        &self,
+        pin: &VerificationPin,
+        backup: &RegistrationBackup,
+    ) -> Result<SuccessOutcome> {
+        self.register_inner(pin, Some(backup)).await
+    }
+
+    async fn register_inner(
+        &self,
+        pin: &VerificationPin,
+        backup: Option<&RegistrationBackup>,
+    ) -> Result<SuccessOutcome> {
+        let mut request = RegisterRequest::new(pin);
+        if let Some(backup) = backup {
+            request = request.with_backup(backup);
+        }
+        let payload = request.to_json();
+        let url = self.register_url();
+        let response = self
+            .execute(Request::post_json(&url, &self.token, &payload))
+            .await?;
+        SuccessOutcome::from_value(&response.json()?)
+    }
+
+    /// Deregisters the bound phone number.
+    ///
+    /// Afterwards the number cannot send any more messages, and re-registering
+    /// it is rate-limited, so this verb is treated as **non-idempotent** even
+    /// though it is a `DELETE` (unlike media deletion, which is genuinely
+    /// repeatable): a 5xx or a lost answer surfaces as [`Error::Ambiguous`] and
+    /// is never re-sent. `{"success": true}` means it worked.
+    ///
+    /// ```
+    /// # use meta_whatsapp::{Result, Transport, WhatsAppClient, transport::{Request, Response}};
+    /// # struct Mock;
+    /// # impl Transport for Mock {
+    /// #     async fn execute(&self, request: Request<'_>) -> Result<Response> {
+    /// #         assert!(request.url.ends_with("/deregister"));
+    /// #         assert_eq!(request.method.as_str(), "DELETE");
+    /// #         assert!(request.body_json().is_none(), "deregister carries no body");
+    /// #         Ok(Response::new(200, std::iter::empty(), br#"{"success":true}"#.to_vec()))
+    /// #     }
+    /// # }
+    /// # async fn demo() -> Result<()> {
+    /// let outcome = WhatsAppClient::new("1", "t", Mock).deregister().await?;
+    /// assert!(outcome.success);
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Transport and Graph API errors. A 5xx surfaces as [`Error::Ambiguous`]
+    /// rather than being retried.
+    pub async fn deregister(&self) -> Result<SuccessOutcome> {
+        let url = self.deregister_url();
+        let response = self
+            .execute_with(
+                Request::delete(&url, &self.token),
+                Repeatability::NotIdempotent,
+            )
+            .await?;
+        SuccessOutcome::from_value(&response.json()?)
+    }
+
+    /// Sets (or rotates) the two-step verification PIN of the bound number.
+    ///
+    /// The PIN is what Meta asks for when the number is registered from a new
+    /// device or after a re-install, so keep it somewhere durable: **there is
+    /// no endpoint to disable two-step verification** and no way to reset it
+    /// from the API — calling this with the *new* PIN is the only supported
+    /// write, and losing the PIN means going through Meta support.
+    ///
+    /// Like [`WhatsAppClient::register`], this is a non-idempotent write: a 5xx
+    /// comes back as [`Error::Ambiguous`] and is never re-sent.
+    ///
+    /// ```
+    /// # use meta_whatsapp::{Result, Transport, VerificationPin, WhatsAppClient, transport::{Request, Response}};
+    /// # struct Mock;
+    /// # impl Transport for Mock {
+    /// #     async fn execute(&self, request: Request<'_>) -> Result<Response> {
+    /// #         assert_eq!(request.method.as_str(), "POST");
+    /// #         assert!(request.url.ends_with("/v21.0/1"), "the number node itself");
+    /// #         assert_eq!(request.body_json().unwrap().as_object().unwrap().len(), 1);
+    /// #         Ok(Response::new(200, std::iter::empty(), br#"{"success":true}"#.to_vec()))
+    /// #     }
+    /// # }
+    /// # async fn demo() -> Result<()> {
+    /// let client = WhatsAppClient::new("1", "t", Mock);
+    /// let outcome = client
+    ///     .set_two_step_verification_pin(&VerificationPin::new("654321")?)
+    ///     .await?;
+    /// assert!(outcome.success);
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] when the PIN is not exactly six ASCII digits; then
+    /// transport and Graph API errors, with a 5xx surfacing as
+    /// [`Error::Ambiguous`].
+    pub async fn set_two_step_verification_pin(
+        &self,
+        pin: &VerificationPin,
+    ) -> Result<SuccessOutcome> {
+        let payload = TwoStepVerificationRequest::new(pin).to_json();
+        let url = self.two_step_verification_url();
+        let response = self
+            .execute(Request::post_json(&url, &self.token, &payload))
+            .await?;
+        SuccessOutcome::from_value(&response.json()?)
+    }
+
     /// Lists the applications subscribed to a WABA's webhooks.
     ///
     /// ```
@@ -1187,7 +1449,9 @@ impl<T: Transport> WhatsAppClient<T> {
     /// non-idempotent request is not, because the message may already have been
     /// delivered. That case surfaces as [`Error::Ambiguous`].
     ///
-    /// The loop is bounded by `policy.max_attempts`; every wait is capped and
+    /// The loop is bounded by `policy.max_attempts`; a wait is either a backoff
+    /// step under `policy.max_delay` or the server's `Retry-After` verbatim (a
+    /// longer hint ends the loop instead of being shortened), and
     /// `tokio::time::sleep` is cancellation safe, so dropping the future stops
     /// the retries immediately.
     async fn execute(&self, request: Request<'_>) -> Result<Response> {

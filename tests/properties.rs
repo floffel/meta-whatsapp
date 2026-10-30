@@ -4,9 +4,9 @@
 use std::time::Duration;
 
 use meta_whatsapp::business::{
-    block_users_payload, validate_block_user, validate_field_list, BusinessProfile,
-    BusinessProfileUpdate, MessagingLimitTier, QualityRating, BLOCK_USER_MAX_DIGITS,
-    BLOCK_USER_MIN_DIGITS,
+    block_users_payload, validate_block_user, validate_field_list, validate_verification_pin,
+    BusinessProfile, BusinessProfileUpdate, MessagingLimitTier, QualityRating, SuccessOutcome,
+    VerificationPin, BLOCK_USER_MAX_DIGITS, BLOCK_USER_MIN_DIGITS, VERIFICATION_PIN_LEN,
 };
 use meta_whatsapp::media::{validate_media_id, MAX_MEDIA_ID_LEN};
 use meta_whatsapp::retry::{Action, Attempt, Repeatability};
@@ -14,8 +14,9 @@ use meta_whatsapp::subscription::{validate_waba_id, WebhookSubscriptions};
 use meta_whatsapp::transport::Method;
 use meta_whatsapp::usage::BusinessUseCaseUsage;
 use meta_whatsapp::{
-    AddressMessage, AddressReply, AddressValues, Error, MessageRequest, RetryPolicy, TemplateQuery,
-    TextMessage, WebhookPayload, WebhookVerifier, ADDRESS_FIELD_MAX_BYTES,
+    AddressMessage, AddressReply, AddressValues, Error, MessageRequest, MultiProductMessage,
+    ProductSection, RetryPolicy, TemplateQuery, TextMessage, WebhookPayload, WebhookVerifier,
+    ADDRESS_FIELD_MAX_BYTES,
 };
 use percent_encoding::percent_decode_str;
 use proptest::prelude::*;
@@ -165,6 +166,31 @@ proptest! {
         }
     }
 
+    /// A multi-product payload is accepted exactly inside the documented
+    /// envelope: 1..=10 sections, 1..=30 products each, 30 at most in total.
+    #[test]
+    fn multi_product_acceptance_matches_the_documented_envelope(
+        sections in prop::collection::vec(0_usize..33, 0..13),
+    ) {
+        let mut message = MultiProductMessage::new("catalog", "Katalog", "Bitte wählen");
+        for (index, count) in sections.iter().enumerate() {
+            let ids = (0..*count).map(|product| format!("sku-{index}-{product}"));
+            message = message.section(ProductSection::from_ids(ids).title(format!("S{index}")));
+        }
+
+        let total: usize = sections.iter().sum();
+        let expected = (1..=10).contains(&sections.len())
+            && sections.iter().all(|count| (1..=30).contains(count))
+            && total <= 30;
+        prop_assert_eq!(
+            message.validate().is_ok(),
+            expected,
+            "sections {:?}, total {}",
+            sections,
+            total
+        );
+    }
+
     /// The delivery contract, pinned: whatever the status, whatever the budget,
     /// a non-idempotent request is **never** retried after a 5xx.
     #[test]
@@ -223,6 +249,70 @@ proptest! {
         }
 
         if attempt == Attempt::Terminal {
+            prop_assert_eq!(action, Action::Surface);
+        }
+    }
+
+    /// A hint that fits under the ceiling is waited out verbatim: the server's
+    /// schedule wins over the curve in both directions.
+    #[test]
+    fn a_retry_after_within_the_ceiling_is_waited_verbatim(
+        attempts in 1_u32..10,
+        hint_ms in 0_u64..5_000,
+        max_ms in 0_u64..5_000,
+        base_ms in 0_u64..500,
+        failed in 0_u32..12,
+    ) {
+        let ceiling = max_ms.max(hint_ms);
+        let policy = RetryPolicy::new(attempts)
+            .with_base_delay(Duration::from_millis(base_ms))
+            .with_max_delay(Duration::from_millis(ceiling));
+        let hint = Duration::from_millis(hint_ms);
+
+        if failed < attempts.max(1) {
+            prop_assert_eq!(policy.delay(failed, Some(hint)), Some(hint));
+        }
+    }
+
+    /// A hint above the ceiling never produces a wait — and never a shorter one.
+    /// The 429 surfaces with the hint intact; a 5xx on a send keeps its own
+    /// rule (`Ambiguous`), hint or not.
+    #[test]
+    fn a_retry_after_above_the_ceiling_never_waits(
+        max_ms in 0_u64..5_000,
+        over_ms in 1_u64..86_400_000,
+        attempts in 0_u32..10,
+        failed in 0_u32..12,
+        status in prop_oneof![Just(429_u16), 500_u16..600],
+        repeatability in prop_oneof![
+            Just(Repeatability::Idempotent),
+            Just(Repeatability::NotIdempotent)
+        ],
+    ) {
+        let policy = RetryPolicy::new(attempts).with_max_delay(Duration::from_millis(max_ms));
+        let hint = Duration::from_millis(max_ms.saturating_add(over_ms));
+        prop_assert!(
+            hint > policy.max_delay,
+            "the case must actually be over the ceiling"
+        );
+
+        let attempt = if status == 429 {
+            Attempt::RateLimited {
+                retry_after: Some(hint),
+            }
+        } else {
+            Attempt::ServerError {
+                retry_after: Some(hint),
+            }
+        };
+        let action = policy.decide(attempt, repeatability, failed);
+
+        prop_assert!(
+            !matches!(action, Action::Retry(_)),
+            "waited {action:?} for a {hint:?} hint above a {:?} ceiling",
+            policy.max_delay
+        );
+        if status == 429 || repeatability.is_idempotent() {
             prop_assert_eq!(action, Action::Surface);
         }
     }
@@ -475,6 +565,62 @@ proptest! {
             prop_assert_eq!(&payload["about"], &Value::String(about.clone()));
             prop_assert!(payload.get("address").is_none());
             prop_assert!(payload["websites"][0].is_string());
+        }
+    }
+
+    /// The PIN gate is exactly "six ASCII digits": a string passes
+    /// `validate_verification_pin` if and only if the predicate holds, so no
+    /// surprising spelling of a PIN ever gets through and none gets locked out.
+    #[test]
+    fn the_pin_rule_is_exactly_six_ascii_digits(raw in ".{0,12}") {
+        let expected = raw.chars().count() == VERIFICATION_PIN_LEN
+            && raw.bytes().all(|byte| byte.is_ascii_digit());
+        prop_assert_eq!(
+            validate_verification_pin(&raw).is_ok(),
+            expected,
+            "the function disagreed for raw: {:?}",
+            raw
+        );
+        prop_assert_eq!(
+            VerificationPin::new(&raw).is_ok(),
+            expected,
+            "the type and the function must agree for raw: {:?}",
+            raw
+        );
+        if !expected && raw.len() >= 2 && raw.bytes().all(|byte| byte.is_ascii_digit()) {
+            let message = validate_verification_pin(&raw).unwrap_err().to_string();
+            prop_assert!(!message.contains(&raw), "the value leaked: {}", message);
+        }
+    }
+
+    /// Six ASCII digits always build, and the value never shows up in a
+    /// rendered form of the type.
+    #[test]
+    fn a_valid_pin_builds_and_stays_redacted(digits in "[0-9]{6}") {
+        let pin = VerificationPin::new(&digits)?;
+        prop_assert_eq!(&format!("{pin:?}"), "VerificationPin([redacted])");
+        prop_assert_eq!(&format!("{pin}"), "6-digit PIN (redacted)");
+        prop_assert_eq!(pin.clone(), VerificationPin::try_from(digits.clone())?);
+        let request = meta_whatsapp::RegisterRequest::new(&pin);
+        prop_assert_eq!(&request.to_json()["pin"], &Value::String(digits.clone()));
+        prop_assert!(!format!("{request:?}").contains(&digits), "the PIN leaked into Debug");
+    }
+
+    /// Success decoding is total: it either produces an outcome or a payload
+    /// error, and it only ever succeeds for an object.
+    #[test]
+    fn success_outcome_parsing_is_total(value in arb_json()) {
+        match SuccessOutcome::from_value(&value) {
+            Ok(outcome) => {
+                prop_assert!(value.is_object(), "non-object accepted: {}", value);
+                prop_assert!(!outcome.extra.contains_key("success"));
+                prop_assert!(!outcome.extra.contains_key("messaging_product"));
+            }
+            Err(err) => prop_assert!(
+                matches!(err, Error::Payload(_)),
+                "only a payload error may result: {:?}",
+                err
+            ),
         }
     }
 }

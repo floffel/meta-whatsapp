@@ -224,9 +224,12 @@ pub enum Action {
 /// How often, and how long, the client retries transient failures.
 ///
 /// The default is three attempts (two retries) with 250 ms doubling to an
-/// 8 s ceiling, honouring `Retry-After`. Every wait is capped by
-/// [`RetryPolicy::max_delay`], so a hostile or broken proxy cannot park the
-/// caller for an unbounded time.
+/// 8 s ceiling. Only the backoff curve is capped by [`RetryPolicy::max_delay`]:
+/// a `Retry-After` hint is the server's own schedule, so it is used verbatim
+/// while it fits under the ceiling, and a longer hint stops the loop instead of
+/// being shortened — waiting less than the server asked for earns a second 429
+/// and burns an attempt. The surfaced [`Error::Api`] keeps the hint, so the
+/// caller can schedule the wait (see [`RetryPolicy::delay`]).
 ///
 /// ```
 /// use std::time::Duration;
@@ -245,7 +248,10 @@ pub struct RetryPolicy {
     pub max_attempts: u32,
     /// Delay after the first failed attempt; doubles per further attempt.
     pub base_delay: Duration,
-    /// Upper bound for a single wait, applied to backoff and `Retry-After`.
+    /// Upper bound for a single backoff wait, and the longest `Retry-After`
+    /// this policy is willing to wait out. It decides *whether* a hint is
+    /// acceptable, never how much of it to wait: a longer hint surfaces the
+    /// error with the hint intact.
     pub max_delay: Duration,
     /// Use the server's `Retry-After` when present instead of the backoff.
     pub use_retry_after: bool,
@@ -307,7 +313,8 @@ impl RetryPolicy {
         self
     }
 
-    /// Overrides the ceiling for a single wait.
+    /// Overrides the ceiling for a backoff wait, and the longest `Retry-After`
+    /// the policy will wait out.
     ///
     /// ```
     /// use std::time::Duration;
@@ -315,6 +322,10 @@ impl RetryPolicy {
     ///
     /// let policy = RetryPolicy::new(10).with_max_delay(Duration::from_secs(2));
     /// assert_eq!(policy.delay(9, None), Some(Duration::from_secs(2)));
+    /// // The same value bounds the hints it accepts: at the ceiling the wait
+    /// // is exact, one second over it is not waited at all.
+    /// assert_eq!(policy.delay(1, Some(Duration::from_secs(2))), Some(Duration::from_secs(2)));
+    /// assert_eq!(policy.delay(1, Some(Duration::from_secs(3))), None);
     /// ```
     #[must_use]
     pub fn with_max_delay(mut self, delay: Duration) -> Self {
@@ -339,10 +350,17 @@ impl RetryPolicy {
     }
 
     /// The wait after `attempts_failed` failed attempts, or `None` when the
-    /// budget is spent and the caller must surface the error.
+    /// caller must surface the error instead of waiting.
     ///
     /// `attempts_failed` counts completed attempts: `1` means the first try
     /// just failed.
+    ///
+    /// `None` has two causes, and both mean "stop retrying now": the budget is
+    /// spent, or the server sent a `Retry-After` longer than
+    /// [`RetryPolicy::max_delay`]. The hint is authoritative, so it is never
+    /// shortened to fit — a wait shorter than the server asked for only earns
+    /// another 429. `max_delay` therefore gates hints rather than trimming them,
+    /// and a surfaced error keeps the hint for the caller's own schedule.
     ///
     /// The backoff is exact: `base_delay` shifted left by `attempts_failed - 1`,
     /// capped at [`RetryPolicy::max_delay`]. There is no float math in the path,
@@ -353,10 +371,19 @@ impl RetryPolicy {
     /// use meta_whatsapp::RetryPolicy;
     ///
     /// let policy = RetryPolicy::default().with_max_delay(Duration::from_secs(3));
-    /// // Retry-After is honoured but clamped to the ceiling.
+    /// // A hint that fits is used verbatim, not replaced by the curve.
     /// assert_eq!(
-    ///     policy.delay(1, Some(Duration::from_secs(30))),
+    ///     policy.delay(1, Some(Duration::from_secs(2))),
+    ///     Some(Duration::from_secs(2))
+    /// );
+    /// // At the ceiling it is still exact; one nanosecond over it is not waited.
+    /// assert_eq!(
+    ///     policy.delay(1, Some(Duration::from_secs(3))),
     ///     Some(Duration::from_secs(3))
+    /// );
+    /// assert_eq!(
+    ///     policy.delay(1, Some(Duration::from_secs(3) + Duration::from_nanos(1))),
+    ///     None
     /// );
     /// ```
     #[must_use]
@@ -368,7 +395,10 @@ impl RetryPolicy {
 
         if self.use_retry_after {
             if let Some(hint) = retry_after {
-                return Some(hint.min(self.max_delay));
+                // The server's schedule wins where it is tolerable. Shortening
+                // it guarantees another 429; a hint above the ceiling is
+                // surfaced intact instead of misrepresented as a short wait.
+                return (hint <= self.max_delay).then_some(hint);
             }
         }
 
@@ -395,10 +425,17 @@ impl RetryPolicy {
     ///   the message may already be delivered; a repeat could duplicate it, so
     ///   the answer is [`Action::Ambiguous`], never a retry.
     ///
+    /// A `Retry-After` is waited out as the server asked, never shortened: a
+    /// hint above [`RetryPolicy::max_delay`] makes the answer
+    /// [`Action::Surface`] (see [`RetryPolicy::delay`]). Only
+    /// [`RetryPolicy::without_retry_after`] both ignores the hint and frees the
+    /// ceiling from gating it.
+    ///
     /// A spent budget always stops the loop; on a non-idempotent request with
     /// an unknown outcome it still reports [`Action::Ambiguous`].
     ///
     /// ```
+    /// use std::time::Duration;
     /// use meta_whatsapp::RetryPolicy;
     /// use meta_whatsapp::retry::{Action, Attempt, Repeatability};
     ///
@@ -419,6 +456,25 @@ impl RetryPolicy {
     ///     policy.decide(Attempt::RateLimited { retry_after: None }, Repeatability::NotIdempotent, 1),
     ///     Action::Retry(_)
     /// ));
+    /// // An hour-long hint is not waited, and not shortened either: the 429
+    /// // surfaces with the hint so the caller can schedule it. One second
+    /// // inside the ceiling is waited exactly.
+    /// assert_eq!(
+    ///     policy.decide(
+    ///         Attempt::RateLimited { retry_after: Some(Duration::from_secs(3600)) },
+    ///         Repeatability::NotIdempotent,
+    ///         1
+    ///     ),
+    ///     Action::Surface
+    /// );
+    /// assert_eq!(
+    ///     RetryPolicy::default().with_max_delay(Duration::from_secs(3600)).decide(
+    ///         Attempt::RateLimited { retry_after: Some(Duration::from_secs(3600)) },
+    ///         Repeatability::NotIdempotent,
+    ///         1
+    ///     ),
+    ///     Action::Retry(Duration::from_secs(3600))
+    /// );
     /// ```
     #[must_use]
     pub fn decide(
@@ -570,5 +626,109 @@ mod tests {
             policy.decide(attempt, Repeatability::NotIdempotent, 1),
             Action::Ambiguous
         );
+    }
+
+    #[test]
+    fn a_hint_is_waited_verbatim_wherever_it_fits_under_the_ceiling() {
+        let policy = RetryPolicy::new(3)
+            .with_base_delay(Duration::from_secs(30))
+            .with_max_delay(Duration::from_secs(60));
+        // Shorter than the curve, zero, and equal to the ceiling: the hint wins
+        // in every case and is never "improved" into a backoff wait.
+        for hint in [
+            Duration::ZERO,
+            Duration::from_millis(1),
+            Duration::from_secs(1),
+            Duration::from_secs(60),
+        ] {
+            assert_eq!(policy.delay(1, Some(hint)), Some(hint), "hint {hint:?}");
+        }
+    }
+
+    #[test]
+    fn a_hint_above_the_ceiling_is_surfaced_to_the_nanosecond() {
+        let policy = RetryPolicy::new(3).with_max_delay(Duration::from_secs(8));
+        let over = Duration::from_secs(8) + Duration::from_nanos(1);
+        assert_eq!(
+            policy.delay(1, Some(Duration::from_secs(8))),
+            Some(Duration::from_secs(8))
+        );
+        assert_eq!(policy.delay(1, Some(over)), None);
+        assert_eq!(
+            policy.decide(
+                Attempt::RateLimited {
+                    retry_after: Some(over)
+                },
+                Repeatability::NotIdempotent,
+                1
+            ),
+            Action::Surface
+        );
+    }
+
+    #[test]
+    fn an_oversized_hint_surfaces_on_every_retryable_attempt() {
+        // An hour is far beyond the default 8 s ceiling: no wait, whatever the
+        // verb, and no shortened wait either.
+        let policy = RetryPolicy::new(10);
+        let hint = Some(Duration::from_secs(3600));
+        for repeatability in [Repeatability::Idempotent, Repeatability::NotIdempotent] {
+            assert_eq!(
+                policy.decide(Attempt::RateLimited { retry_after: hint }, repeatability, 1),
+                Action::Surface,
+                "429 / {repeatability:?}"
+            );
+        }
+        assert_eq!(
+            policy.decide(
+                Attempt::ServerError { retry_after: hint },
+                Repeatability::Idempotent,
+                1
+            ),
+            Action::Surface,
+            "5xx on a read"
+        );
+        // A 5xx on a send stays ambiguous: the hint changes nothing there.
+        assert_eq!(
+            policy.decide(
+                Attempt::ServerError { retry_after: hint },
+                Repeatability::NotIdempotent,
+                1
+            ),
+            Action::Ambiguous
+        );
+    }
+
+    #[test]
+    fn a_spent_budget_surfaces_even_a_hint_that_fits() {
+        let policy = RetryPolicy::new(2);
+        assert_eq!(
+            policy.delay(2, Some(Duration::from_millis(10))),
+            None,
+            "the budget is the budget"
+        );
+    }
+
+    #[test]
+    fn without_retry_after_bounds_the_curve_instead_of_surfacing() {
+        // The escape hatch: an untrusted hint is ignored entirely, so the
+        // ceiling clamps the backoff rather than ending the retries.
+        let policy = RetryPolicy::default()
+            .with_base_delay(Duration::from_secs(30))
+            .without_retry_after();
+        assert_eq!(
+            policy.delay(1, Some(Duration::from_secs(3600))),
+            Some(policy.max_delay)
+        );
+        assert!(matches!(
+            policy.decide(
+                Attempt::RateLimited {
+                    retry_after: Some(Duration::from_secs(3600))
+                },
+                Repeatability::NotIdempotent,
+                1
+            ),
+            Action::Retry(_)
+        ));
     }
 }

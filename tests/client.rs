@@ -88,25 +88,65 @@ async fn mark_read_rejects_an_empty_message_id() {
     assert_eq!(transport.call_count(), 0);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn retry_after_is_honoured_on_429() {
     let transport = MockTransport::new();
     transport.push_response(response(
         429,
-        &[("Retry-After", "1")],
+        &[("Retry-After", "3600")],
         b"{\"error\":{\"code\":4,\"message\":\"rate limited\"}}",
     ));
     transport.push_response(accepted("wamid.1"));
 
+    // The ceiling accepts the hint exactly, and the base delay is zero, so any
+    // wait at all can only come from the header.
     let client = client(transport.clone()).with_retry(
         RetryPolicy::new(2)
             .with_base_delay(Duration::ZERO)
-            .with_max_delay(Duration::from_millis(1)),
+            .with_max_delay(Duration::from_secs(3600)),
     );
 
+    // Without the `http` feature the crate has no timer and both attempts run
+    // back to back; there the wait itself is only verifiable in `RetryPolicy`,
+    // which the assertions above and `tests/delivery.rs` pin.
+    #[cfg(feature = "http")]
+    let started = tokio::time::Instant::now();
     let value = client.send_text("1", "hi").await.unwrap();
     assert_eq!(value["messages"][0]["id"], "wamid.1");
     assert_eq!(transport.call_count(), 2);
+    #[cfg(feature = "http")]
+    assert_eq!(
+        started.elapsed(),
+        Duration::from_secs(3600),
+        "the whole hint is waited, never shortened to the curve or the ceiling"
+    );
+}
+
+/// The pair of the test above: one second more than the ceiling is not waited
+/// out at all — the 429 surfaces after a single call, hint intact, so the
+/// caller can schedule it instead of the library guessing.
+#[tokio::test]
+async fn a_retry_after_above_the_ceiling_surfaces_the_429() {
+    let transport = MockTransport::new();
+    for _ in 0..2 {
+        transport.push_response(response(
+            429,
+            &[("Retry-After", "3601")],
+            b"{\"error\":{\"code\":4,\"message\":\"rate limited\"}}",
+        ));
+    }
+    let client = client(transport.clone()).with_retry(
+        RetryPolicy::new(2)
+            .with_base_delay(Duration::ZERO)
+            .with_max_delay(Duration::from_secs(3600)),
+    );
+
+    let err = client.send_text("1", "hi").await.unwrap_err();
+
+    assert_eq!(transport.call_count(), 1);
+    assert_eq!(err.status(), Some(429));
+    assert_eq!(err.retry_after(), Some(Duration::from_secs(3601)));
+    assert!(err.is_retryable());
 }
 
 #[tokio::test]
@@ -320,9 +360,11 @@ fn retry_defaults_are_bounded() {
     assert_eq!(policy.delay(1, None), Some(Duration::from_millis(250)));
     assert_eq!(policy.delay(2, None), Some(Duration::from_millis(500)));
     assert_eq!(policy.delay(3, None), None);
-    // Retry-After is clamped to the ceiling.
+    // A hint is not clamped to the ceiling: at the ceiling it is waited out
+    // exactly, and above it the 429 surfaces instead of being shortened.
     assert_eq!(
-        policy.delay(1, Some(Duration::from_secs(600))),
+        policy.delay(1, Some(Duration::from_secs(8))),
         Some(Duration::from_secs(8))
     );
+    assert_eq!(policy.delay(1, Some(Duration::from_secs(600))), None);
 }

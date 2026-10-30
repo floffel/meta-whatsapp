@@ -23,8 +23,11 @@
 //! # Ok::<(), meta_whatsapp::Error>(())
 //! ```
 
+use std::fmt;
+
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Map, Value};
+use subtle::ConstantTimeEq;
 
 use crate::error::{Error, Result};
 use crate::template::Paging;
@@ -1150,6 +1153,492 @@ pub fn validate_field_list(fields: &str) -> Result<()> {
     }
 }
 
+/// Length of the registration / two-step verification PIN: exactly this many
+/// ASCII digits.
+///
+/// ```
+/// assert_eq!(meta_whatsapp::business::VERIFICATION_PIN_LEN, 6);
+/// ```
+pub const VERIFICATION_PIN_LEN: usize = 6;
+
+/// Validates a registration / two-step verification PIN.
+///
+/// Meta wants exactly [`VERIFICATION_PIN_LEN`] ASCII digits. Everything else
+/// fails here, before the value is copied into a body or put on the wire:
+/// empty, too short, too long, a letter, or a digit that is not an ASCII one
+/// (`１２３４５６` and `١٢٣٤٥٦` are six *characters* each and are rejected —
+/// the API would refuse them anyway, and a PIN that cannot be typed is worse
+/// than no PIN).
+///
+/// ```
+/// use meta_whatsapp::business::validate_verification_pin;
+///
+/// assert!(validate_verification_pin("123456").is_ok());
+/// assert!(validate_verification_pin("").is_err(), "fail closed on empty");
+/// assert!(validate_verification_pin("12345").is_err(), "one digit short");
+/// assert!(validate_verification_pin("1234567").is_err(), "one digit long");
+/// assert!(validate_verification_pin("12345a").is_err(), "not all digits");
+/// assert!(validate_verification_pin("１２３４５６").is_err(), "fullwidth digits");
+/// assert!(validate_verification_pin("١٢٣٤٥٦").is_err(), "Arabic-Indic digits");
+/// ```
+///
+/// # Errors
+///
+/// [`Error::Validation`] naming `pin`. Neither the value nor its length is
+/// echoed back: a validation message ends up in logs.
+pub fn validate_verification_pin(pin: &str) -> Result<()> {
+    let valid = pin.chars().count() == VERIFICATION_PIN_LEN
+        && pin.bytes().all(|byte| byte.is_ascii_digit());
+    if valid {
+        Ok(())
+    } else {
+        Err(Error::validation(
+            "pin",
+            format!("must be exactly {VERIFICATION_PIN_LEN} ASCII digits"),
+        ))
+    }
+}
+
+/// The six-digit PIN for registering a number or setting two-step
+/// verification.
+///
+/// A PIN is a secret, so this type is built to be unusable as a string:
+///
+/// * `Debug` prints `VerificationPin([redacted])`,
+/// * `Display` prints `6-digit PIN (redacted)`,
+/// * there is no getter, no `AsRef<str>`, no `Hash` and no `Default` — a PIN
+///   that has a default is a PIN nobody chose.
+///
+/// The value can be created, compared (in constant time) and handed to
+/// [`RegisterRequest::to_json`] / [`TwoStepVerificationRequest::to_json`].
+/// That is the whole surface.
+///
+/// ```
+/// use meta_whatsapp::business::VerificationPin;
+///
+/// let pin = VerificationPin::new("123456")?;
+/// assert_eq!(format!("{pin:?}"), "VerificationPin([redacted])");
+/// assert_eq!(format!("{pin}"), "6-digit PIN (redacted)");
+/// assert!(VerificationPin::new("12345").is_err(), "never sent, never allocated");
+/// # Ok::<(), meta_whatsapp::Error>(())
+/// ```
+#[derive(Clone)]
+pub struct VerificationPin {
+    digits: String,
+}
+
+impl VerificationPin {
+    /// Validates `raw` and takes ownership of it.
+    ///
+    /// ```
+    /// use meta_whatsapp::business::VerificationPin;
+    ///
+    /// assert!(VerificationPin::new("000000").is_ok(), "all zeros is a legal PIN");
+    /// assert!(VerificationPin::new("12345").is_err());
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] naming `pin` when `raw` is not exactly
+    /// [`VERIFICATION_PIN_LEN`] ASCII digits.
+    pub fn new(raw: &str) -> Result<Self> {
+        validate_verification_pin(raw)?;
+        Ok(Self {
+            digits: raw.to_owned(),
+        })
+    }
+}
+
+impl TryFrom<&str> for VerificationPin {
+    type Error = Error;
+
+    /// Same rule as [`VerificationPin::new`].
+    fn try_from(raw: &str) -> Result<Self> {
+        Self::new(raw)
+    }
+}
+
+impl TryFrom<String> for VerificationPin {
+    type Error = Error;
+
+    /// Same rule as [`VerificationPin::new`].
+    fn try_from(raw: String) -> Result<Self> {
+        Self::new(&raw)
+    }
+}
+
+impl fmt::Debug for VerificationPin {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Never the digits, not even a masked prefix or the length.
+        f.write_str("VerificationPin([redacted])")
+    }
+}
+
+impl fmt::Display for VerificationPin {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{VERIFICATION_PIN_LEN}-digit PIN (redacted)")
+    }
+}
+
+impl PartialEq for VerificationPin {
+    fn eq(&self, other: &Self) -> bool {
+        // Constant time: a PIN comparison should not leak through timing.
+        bool::from(self.digits.as_bytes().ct_eq(other.digits.as_bytes()))
+    }
+}
+
+impl Eq for VerificationPin {}
+
+/// The `backup` object of a registration call: an encrypted account backup
+/// brought over from an on-premises installation.
+///
+/// *Unverified*: the published OpenAPI description does not model this object,
+/// so the shape comes from the reference page alone
+/// (<https://developers.facebook.com/docs/whatsapp/cloud-api/reference>).
+///
+/// Both fields are secrets. `Debug` prints the password as `[redacted]` and
+/// the data only as a character count.
+///
+/// ```
+/// use meta_whatsapp::business::RegistrationBackup;
+///
+/// let backup = RegistrationBackup::new("hunter2", "BASE64…")?;
+/// let body = backup.to_json();
+/// assert_eq!(body["password"], "hunter2");
+/// assert_eq!(body["data"], "BASE64…");
+/// assert!(!format!("{backup:?}").contains("hunter2"), "the password stays out of the log");
+/// assert!(RegistrationBackup::new("", "data").is_err(), "an empty password is not a password");
+/// # Ok::<(), meta_whatsapp::Error>(())
+/// ```
+#[derive(Clone)]
+pub struct RegistrationBackup {
+    password: String,
+    data: String,
+}
+
+impl RegistrationBackup {
+    /// Builds a backup blob, rejecting empty parts.
+    ///
+    /// An empty `password` or `data` would be sent as `""` and rejected by the
+    /// API after the number is already in a half-registered state, so it fails
+    /// locally instead.
+    ///
+    /// ```
+    /// use meta_whatsapp::business::RegistrationBackup;
+    ///
+    /// assert!(RegistrationBackup::new("p", "d").is_ok(), "one character is enough");
+    /// assert!(RegistrationBackup::new("", "d").is_err());
+    /// assert!(RegistrationBackup::new("p", "").is_err());
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] naming `backup.password` or `backup.data` when the
+    /// matching part is empty.
+    pub fn new(password: impl Into<String>, data: impl Into<String>) -> Result<Self> {
+        let password = password.into();
+        let data = data.into();
+        if password.is_empty() {
+            return Err(Error::validation("backup.password", "must not be empty"));
+        }
+        if data.is_empty() {
+            return Err(Error::validation("backup.data", "must not be empty"));
+        }
+        Ok(Self { password, data })
+    }
+
+    /// Renders the object Meta expects: `{"password": …, "data": …}`.
+    ///
+    /// ```
+    /// use meta_whatsapp::business::RegistrationBackup;
+    ///
+    /// let body = RegistrationBackup::new("pw", "blob")?.to_json();
+    /// assert_eq!(body, serde_json::json!({"password": "pw", "data": "blob"}));
+    /// # Ok::<(), meta_whatsapp::Error>(())
+    /// ```
+    #[must_use]
+    pub fn to_json(&self) -> Value {
+        let mut object = Map::new();
+        object.insert("password".to_string(), Value::String(self.password.clone()));
+        object.insert("data".to_string(), Value::String(self.data.clone()));
+        Value::Object(object)
+    }
+}
+
+impl fmt::Debug for RegistrationBackup {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // The blob is an encrypted account export: not something to put in a log.
+        f.debug_struct("RegistrationBackup")
+            .field("password", &"[redacted]")
+            .field("data_chars", &self.data.chars().count())
+            .finish()
+    }
+}
+
+/// Body of `POST /{PHONE_NUMBER_ID}/register`.
+///
+/// ```
+/// use meta_whatsapp::business::{RegisterRequest, RegistrationBackup, VerificationPin};
+///
+/// let pin = VerificationPin::new("123456")?;
+/// let body = RegisterRequest::new(&pin).to_json();
+/// assert_eq!(body["messaging_product"], "whatsapp");
+/// assert_eq!(body["pin"], "123456");
+/// assert!(body.get("backup").is_none(), "backup is opt-in");
+///
+/// let with_backup = RegisterRequest::new(&pin)
+///     .with_backup(&RegistrationBackup::new("pw", "blob")?)
+///     .to_json();
+/// assert_eq!(with_backup["backup"]["data"], "blob");
+/// # Ok::<(), meta_whatsapp::Error>(())
+/// ```
+#[derive(Debug, Clone)]
+pub struct RegisterRequest {
+    pin: VerificationPin,
+    backup: Option<RegistrationBackup>,
+}
+
+impl RegisterRequest {
+    /// A registration body for `pin`, without a backup.
+    ///
+    /// ```
+    /// use meta_whatsapp::business::{RegisterRequest, VerificationPin};
+    ///
+    /// let pin = VerificationPin::new("123456")?;
+    /// assert_eq!(RegisterRequest::new(&pin).to_json()["messaging_product"], "whatsapp");
+    /// # Ok::<(), meta_whatsapp::Error>(())
+    /// ```
+    #[must_use]
+    pub fn new(pin: &VerificationPin) -> Self {
+        Self {
+            pin: pin.clone(),
+            backup: None,
+        }
+    }
+
+    /// Adds the on-premises `backup` object.
+    ///
+    /// ```
+    /// use meta_whatsapp::business::{RegisterRequest, RegistrationBackup, VerificationPin};
+    ///
+    /// let pin = VerificationPin::new("123456")?;
+    /// let request = RegisterRequest::new(&pin)
+    ///     .with_backup(&RegistrationBackup::new("pw", "blob")?);
+    /// assert!(request.to_json().get("backup").is_some());
+    /// # Ok::<(), meta_whatsapp::Error>(())
+    /// ```
+    #[must_use]
+    pub fn with_backup(mut self, backup: &RegistrationBackup) -> Self {
+        self.backup = Some(backup.clone());
+        self
+    }
+
+    /// Renders the JSON body.
+    ///
+    /// ```
+    /// use meta_whatsapp::business::{RegisterRequest, VerificationPin};
+    ///
+    /// let pin = VerificationPin::new("123456")?;
+    /// let body = RegisterRequest::new(&pin).to_json();
+    /// assert_eq!(
+    ///     body,
+    ///     serde_json::json!({"messaging_product": "whatsapp", "pin": "123456"})
+    /// );
+    /// # Ok::<(), meta_whatsapp::Error>(())
+    /// ```
+    #[must_use]
+    pub fn to_json(&self) -> Value {
+        let mut object = Map::new();
+        object.insert(
+            "messaging_product".to_string(),
+            Value::String("whatsapp".to_string()),
+        );
+        object.insert("pin".to_string(), Value::String(self.pin.digits.clone()));
+        if let Some(backup) = &self.backup {
+            object.insert("backup".to_string(), backup.to_json());
+        }
+        Value::Object(object)
+    }
+}
+
+/// Body of `POST /{PHONE_NUMBER_ID}` that sets the two-step verification PIN.
+///
+/// The reference sends `pin` on its own here — no `messaging_product`. There is
+/// **no endpoint to disable two-step verification**: the only write is a
+/// replacement, so rotating means calling this again with the new PIN and
+/// turning it off is not possible from the API at all.
+///
+/// ```
+/// use meta_whatsapp::business::{TwoStepVerificationRequest, VerificationPin};
+///
+/// let pin = VerificationPin::new("123456")?;
+/// let body = TwoStepVerificationRequest::new(&pin).to_json();
+/// assert_eq!(body, serde_json::json!({"pin": "123456"}));
+/// # Ok::<(), meta_whatsapp::Error>(())
+/// ```
+#[derive(Debug, Clone)]
+pub struct TwoStepVerificationRequest {
+    pin: VerificationPin,
+}
+
+impl TwoStepVerificationRequest {
+    /// A PIN-set body.
+    ///
+    /// ```
+    /// use meta_whatsapp::business::{TwoStepVerificationRequest, VerificationPin};
+    ///
+    /// let pin = VerificationPin::new("654321")?;
+    /// assert_eq!(TwoStepVerificationRequest::new(&pin).to_json()["pin"], "654321");
+    /// # Ok::<(), meta_whatsapp::Error>(())
+    /// ```
+    #[must_use]
+    pub fn new(pin: &VerificationPin) -> Self {
+        Self { pin: pin.clone() }
+    }
+
+    /// Renders the JSON body: exactly one key, `pin`.
+    ///
+    /// ```
+    /// use meta_whatsapp::business::{TwoStepVerificationRequest, VerificationPin};
+    ///
+    /// let pin = VerificationPin::new("654321")?;
+    /// assert_eq!(TwoStepVerificationRequest::new(&pin).to_json().as_object().unwrap().len(), 1);
+    /// # Ok::<(), meta_whatsapp::Error>(())
+    /// ```
+    #[must_use]
+    pub fn to_json(&self) -> Value {
+        let mut object = Map::new();
+        object.insert("pin".to_string(), Value::String(self.pin.digits.clone()));
+        Value::Object(object)
+    }
+}
+
+/// What to say when `success` is a string that does not spell a boolean.
+///
+/// Where an error message would have to quote a value to be useful, it does
+/// not: an API that echoes the request back in a reply field would otherwise
+/// put a PIN into a log line. Naming the shape is enough to debug from.
+const SUCCESS_FLAG_SHAPE: &str =
+    "unexpected success flag: expected a boolean, got a string that is not one";
+
+/// Names the JSON type of `value` without printing any of its contents.
+fn json_shape(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "a boolean",
+        Value::Number(_) => "a number",
+        Value::String(_) => "a string",
+        Value::Array(_) => "an array",
+        Value::Object(_) => "an object",
+    }
+}
+
+/// An error naming the field, what was expected and what arrived — by type only.
+fn unexpected_shape(field: &str, expected: &str, value: &Value) -> String {
+    format!(
+        "unexpected {field}: expected {expected}, got {}",
+        json_shape(value)
+    )
+}
+
+/// The `{"success": true}` answer these lifecycle calls give back.
+///
+/// Permissive by design (see the README's *unverified* note): Meta documents
+/// `success` as a boolean but has been observed to omit it, send it as a
+/// number, or send the strings `"true"` / `"1"`. Every one of those is
+/// accepted; only a value that cannot mean a flag at all is an error. Unknown
+/// fields are kept in `extra`.
+///
+/// ```
+/// use meta_whatsapp::business::SuccessOutcome;
+///
+/// let parsed = SuccessOutcome::from_value(&serde_json::json!({
+///     "success": true, "messaging_product": "whatsapp", "future_field": 1
+/// }))?;
+/// assert!(parsed.success);
+/// assert_eq!(parsed.messaging_product.as_deref(), Some("whatsapp"));
+/// assert_eq!(parsed.extra["future_field"], 1);
+///
+/// // A missing flag reads as `false`, never as an error.
+/// assert!(!SuccessOutcome::from_value(&serde_json::json!({}))?.success);
+/// # Ok::<(), meta_whatsapp::Error>(())
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct SuccessOutcome {
+    /// Whether Meta reported success.
+    pub success: bool,
+    /// Always `whatsapp` when present.
+    pub messaging_product: Option<String>,
+    /// Fields this crate does not model, preserved verbatim.
+    pub extra: Map<String, Value>,
+}
+
+impl SuccessOutcome {
+    /// Reads the result from the JSON body.
+    ///
+    /// ```
+    /// use meta_whatsapp::business::SuccessOutcome;
+    ///
+    /// assert!(SuccessOutcome::from_value(&serde_json::json!("true")).is_err(), "not an object");
+    /// assert!(SuccessOutcome::from_value(&serde_json::json!({"success": 1}))?.success);
+    /// # Ok::<(), meta_whatsapp::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Payload`] when the value is not an object, when `success`
+    /// carries something that cannot mean a flag, or when `messaging_product`
+    /// is neither a string nor absent.
+    pub fn from_value(value: &Value) -> Result<Self> {
+        if !value.is_object() {
+            return Err(Error::Payload(
+                "expected a JSON object for the success result".to_string(),
+            ));
+        }
+        let success = match value.get("success") {
+            None | Some(Value::Null) => false,
+            Some(Value::Bool(flag)) => *flag,
+            Some(Value::Number(number)) => match number.as_i64() {
+                Some(integer) => integer != 0,
+                None => number.as_f64().is_some_and(|float| float != 0.0),
+            },
+            Some(Value::String(text)) => match text.to_ascii_lowercase().as_str() {
+                "true" | "1" => true,
+                "false" | "0" => false,
+                _ => return Err(Error::Payload(SUCCESS_FLAG_SHAPE.to_string())),
+            },
+            Some(other) => {
+                return Err(Error::Payload(unexpected_shape(
+                    "success",
+                    "a boolean",
+                    other,
+                )))
+            }
+        };
+        let messaging_product = match value.get("messaging_product") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(text)) => Some(text.clone()),
+            Some(other) => {
+                return Err(Error::Payload(unexpected_shape(
+                    "messaging_product",
+                    "a string",
+                    other,
+                )));
+            }
+        };
+        let mut extra = value.as_object().cloned().unwrap_or_default();
+        for known in ["success", "messaging_product"] {
+            extra.remove(known);
+        }
+        Ok(Self {
+            success,
+            messaging_product,
+            extra,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1273,6 +1762,179 @@ mod tests {
             assert!(
                 validate_field_list(bad).is_err(),
                 "{bad:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn pins_are_counted_in_characters_not_bytes() {
+        assert!(validate_verification_pin("123456").is_ok());
+        assert!(validate_verification_pin("000000").is_ok());
+        // Just outside, on both sides.
+        assert!(validate_verification_pin("").is_err());
+        assert!(validate_verification_pin("12345").is_err());
+        assert!(validate_verification_pin("1234567").is_err());
+        // Not ASCII digits, even when there are exactly six of them.
+        for bad in [
+            "12345a",
+            "12 456",
+            "-12345",
+            "１２３４５６",
+            "١٢٣٤٥٦",
+            "①②③④⑤⑥",
+        ] {
+            assert!(
+                validate_verification_pin(bad).is_err(),
+                "{bad:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn a_validation_message_never_carries_the_pin() {
+        let err = validate_verification_pin("12345").unwrap_err();
+        let rendered = format!("{err}");
+        assert!(rendered.contains("pin"), "{rendered}");
+        assert!(
+            !rendered.contains("12345"),
+            "the digits stay out: {rendered}"
+        );
+        assert!(!rendered.contains("6-digit"));
+    }
+
+    #[test]
+    fn a_pin_redacts_itself_everywhere() {
+        let pin = VerificationPin::new("123456").unwrap();
+        assert_eq!(format!("{pin:?}"), "VerificationPin([redacted])");
+        assert_eq!(format!("{pin}"), "6-digit PIN (redacted)");
+        assert_eq!(pin, VerificationPin::new("123456").unwrap());
+        assert_ne!(pin, VerificationPin::new("654321").unwrap());
+        assert_eq!(VerificationPin::try_from("123456").unwrap(), pin);
+        assert_eq!(
+            VerificationPin::try_from(String::from("123456")).unwrap(),
+            pin
+        );
+        assert!(VerificationPin::try_from("nope").is_err());
+        assert!(VerificationPin::try_from(String::from("nope")).is_err());
+        // Cloning keeps the value; the request types print the redacted form.
+        let request = RegisterRequest::new(&pin);
+        assert!(!format!("{request:?}").contains("123456"));
+        let two_step = TwoStepVerificationRequest::new(&pin);
+        assert!(!format!("{two_step:?}").contains("123456"));
+    }
+
+    #[test]
+    fn backup_parts_are_required_and_redacted() {
+        assert!(RegistrationBackup::new("", "data").is_err());
+        assert!(RegistrationBackup::new("pw", "").is_err());
+        let backup = RegistrationBackup::new(" ", " ").unwrap();
+        assert_eq!(backup.to_json()["password"], " ");
+
+        let backup = RegistrationBackup::new("hunter2", "abc").unwrap();
+        let rendered = format!("{backup:?}");
+        assert!(!rendered.contains("hunter2"), "{rendered}");
+        assert!(!rendered.contains("abc"), "{rendered}");
+        assert!(rendered.contains("data_chars: 3"), "{rendered}");
+    }
+
+    #[test]
+    fn registration_bodies_hold_exactly_the_documented_keys() {
+        let pin = VerificationPin::new("123456").unwrap();
+        let plain = RegisterRequest::new(&pin).to_json();
+        assert_eq!(
+            plain,
+            serde_json::json!({"messaging_product": "whatsapp", "pin": "123456"})
+        );
+
+        let with_backup = RegisterRequest::new(&pin)
+            .with_backup(&RegistrationBackup::new("pw", "blob").unwrap())
+            .to_json();
+        assert_eq!(
+            with_backup,
+            serde_json::json!({
+                "messaging_product": "whatsapp",
+                "pin": "123456",
+                "backup": {"password": "pw", "data": "blob"}
+            })
+        );
+
+        // Two-step verification sends the PIN alone, and cannot be turned off.
+        assert_eq!(
+            TwoStepVerificationRequest::new(&pin).to_json(),
+            serde_json::json!({"pin": "123456"})
+        );
+    }
+
+    #[test]
+    fn success_flags_are_read_permissively() {
+        let cases: Vec<(Value, bool)> = vec![
+            (serde_json::json!({"success": true}), true),
+            (serde_json::json!({"success": false}), false),
+            (serde_json::json!({}), false),
+            (serde_json::json!({"success": null}), false),
+            (serde_json::json!({"success": 1}), true),
+            (serde_json::json!({"success": 0}), false),
+            (serde_json::json!({"success": -2}), true),
+            (serde_json::json!({"success": 0.5}), true),
+            (serde_json::json!({"success": 0.0}), false),
+            (serde_json::json!({"success": "true"}), true),
+            (serde_json::json!({"success": "TRUE"}), true),
+            (serde_json::json!({"success": "1"}), true),
+            (serde_json::json!({"success": "false"}), false),
+            (serde_json::json!({"success": "0"}), false),
+        ];
+        for (value, expected) in cases {
+            assert_eq!(
+                SuccessOutcome::from_value(&value).unwrap().success,
+                expected,
+                "{value}"
+            );
+        }
+    }
+
+    #[test]
+    fn success_keeps_unknown_fields_and_the_product() {
+        let outcome = SuccessOutcome::from_value(&serde_json::json!({
+            "success": true,
+            "messaging_product": "whatsapp",
+            "future": {"a": 1}
+        }))
+        .unwrap();
+        assert!(outcome.success);
+        assert_eq!(outcome.messaging_product.as_deref(), Some("whatsapp"));
+        assert_eq!(outcome.extra["future"]["a"], 1);
+        assert!(!outcome.extra.contains_key("success"));
+
+        let default = SuccessOutcome::default();
+        assert_eq!(
+            default,
+            SuccessOutcome::from_value(&serde_json::json!({})).unwrap()
+        );
+    }
+
+    #[test]
+    fn shapes_that_cannot_be_a_success_answer_are_payload_errors() {
+        for value in [
+            serde_json::json!([]),
+            serde_json::json!("true"),
+            serde_json::json!(null),
+            serde_json::json!(7),
+        ] {
+            assert!(
+                matches!(SuccessOutcome::from_value(&value), Err(Error::Payload(_))),
+                "{value} must be rejected"
+            );
+        }
+        for value in [
+            serde_json::json!({"success": "maybe"}),
+            serde_json::json!({"success": [true]}),
+            serde_json::json!({"success": {"a": 1}}),
+            serde_json::json!({"messaging_product": 7}),
+            serde_json::json!({"messaging_product": ["whatsapp"]}),
+        ] {
+            assert!(
+                matches!(SuccessOutcome::from_value(&value), Err(Error::Payload(_))),
+                "{value} must be rejected"
             );
         }
     }

@@ -18,6 +18,8 @@ Secondary sources — the developer reference pages the spec links to:
 * Cloud API overview: `https://developers.facebook.com/docs/whatsapp/cloud-api`
 * Webhooks / subscription setup: `https://developers.facebook.com/docs/whatsapp/cloud-api/guides/set-up-webhooks`
 * Block users: `https://developers.facebook.com/docs/business-messaging/whatsapp/block-users`
+* Phone-number registration / deregistration: `https://developers.facebook.com/docs/whatsapp/cloud-api/reference` (the `/{PHONE_NUMBER_ID}/register` and `/{PHONE_NUMBER_ID}/deregister` edges)
+* Two-step verification PIN: `https://developers.facebook.com/docs/whatsapp/cloud-api/reference/two-step-verification`
 * Quality rating background: `https://www.facebook.com/business/help/896873687365001`
 * Address messages (India only, `interactive.type = address_message`):
   `https://developers.facebook.com/documentation/business-messaging/whatsapp/messages/address-messages/`
@@ -36,6 +38,9 @@ Secondary sources — the developer reference pages the spec links to:
 | `business_profile` | `GET /{phone-number-id}/whatsapp_business_profile` | `/{Version}/{Phone-Number-ID}/whatsapp_business_profile` |
 | `update_business_profile` | `POST /{phone-number-id}/whatsapp_business_profile` | same |
 | `phone_number_info`, `phone_number_info_with` | `GET /{phone-number-id}?fields=…` | `/{Version}/{Phone-Number-ID}` |
+| `register`, `register_with_backup` | `POST /{phone-number-id}/register` | `/{Version}/{Phone-Number-ID}/register` |
+| `deregister` | `DELETE /{phone-number-id}/deregister` | `/{Version}/{Phone-Number-ID}/deregister` |
+| `set_two_step_verification_pin` | `POST /{phone-number-id}` (body `{"pin":"…"}`) | `/{Version}/{Phone-Number-ID}` |
 | `blocked_users` | `GET /{phone-number-id}/block_users` | `/{Version}/{Phone-Number-ID}/block_users` |
 | `block_users` | `POST /{phone-number-id}/block_users` | same |
 | `unblock_users` | `DELETE /{phone-number-id}/block_users` | same |
@@ -53,11 +58,17 @@ Secondary sources — the developer reference pages the spec links to:
 | `MessagingLimitTier` | `WhatsAppAccountNumber.messaging_limit_tier` | TIER_50, TIER_250, TIER_1K, TIER_10K, TIER_100K, TIER_UNLIMITED. |
 | `BlockedUser` / `BlockedUsersPage` | `GetBlockedUsersData`, `BlockedUser` | `data[]` plus `paging`. |
 | `BlockOutcome` | `BlockUsersData` (`added_users`), `UnblockUsersData` (`removed_users`), `BlockedUserOperation` | Same payload shape for POST and DELETE; ids travel in the body. |
+| `SuccessOutcome` | register / deregister / two-step responses (`success`) | `success` is documented as a boolean; missing, `1`/`0` and `"true"`/`"1"` also decode — see *unverified*, README. Unknown fields land in `extra`. |
+| `VerificationPin` | two-step verification reference | exactly 6 ASCII digits, checked before allocation. `Debug`/`Display` are fixed redacted text; no getter, no `Default`, equality is constant time. |
+| `RegistrationBackup` | register edge (`backup{password,data}`) | on-premises migration blob; the OpenAPI description does not pin the shape down — see *unverified*, README. |
+| `RegisterRequest` / `TwoStepVerificationRequest` | register edge, two-step reference | register sends `messaging_product` + `pin` (+ optional `backup`); two-step sends `pin` alone. |
 | `WebhookSubscriptions` / `SubscribedApp` | `SubscribedAppsResponse`, `SubscribedApp` | Each entry may wrap the app in `whatsapp_business_api_data` (spec example) — both parse. |
 | `SubscriptionConfig` | `SubscriptionRequest` | `override_callback_uri`, `verify_token`. |
 | `AddressMessage` / `AddressValues` / `SavedAddress` / `AddressValidationError` | `interactive` with `type` and `action.name` = `address_message` | Values in the guide's field table; `in_pin_code` max 6 characters is the only per-field limit it publishes. `country` is required (ISO 3166-1 alpha-2) and is an action parameter, not a value. `validation_errors` is a field → message object. The number of `saved_addresses` is not bounded — see *unverified*, README. |
 | `AddressReply` | `interactive.nfm_reply.response_json` (a JSON string) | `{"saved_address_id": …, "values": {…}}` from the guide's submission example; unknown keys stay in `extra`. |
 | `BusinessUseCaseUsage` / `UseCaseUsage` | header `x-business-use-case-usage` | Header value is a JSON object keyed by business id, each value an array of `{type, call_count, total_cputime, total_time, estimated_time_to_regain_access}`. |
+| `SingleProductMessage` | `Interactive` with `type: product`, `ActionObject` variant `{catalog_id, product_retailer_id}` | `HeaderObject` says a header "cannot be set for 'product' type", so the struct has none. `BodyObject` is "optional for 'product' type"; footer optional. Body 1024, footer 60. |
+| `MultiProductMessage` / `ProductSection` / `ProductItem` | `Interactive` with `type: product_list`, `ActionObject` variant `{catalog_id, sections}`, `SectionObject.product_items` | Header "required for 'product_list'", body "required for other interactive message types" — both are constructor arguments. `sections` 1–10, `product_items` 1–30 per section, section `title` max 24 and required once there is more than one section, header/footer 60, body 1024. Meta's reference caps the whole message at 30 products, so that cap applies on top of the per-section one. |
 
 ## Deliberate divergences
 
@@ -68,6 +79,9 @@ Secondary sources — the developer reference pages the spec links to:
   `MessagingLimitTier::Unknown` and the string-typed `vertical`, `name_status`
   and `account_mode` keep whatever Meta sends, so a new value cannot break a
   deployment.
+* **Two-step verification is set, never disabled.** `POST /{PHONE_NUMBER_ID}` with a `pin` is the only write the reference offers; there is no endpoint to turn two-step verification off, so this crate exposes `set_two_step_verification_pin` (rotation) and no `disable`.
+* **The two-step body carries `pin` alone.** Unlike `register`, the reference does not send `messaging_product` there, so neither do we.
+* **`deregister` is treated as non-idempotent even though it is a `DELETE`.** `Repeatability::of_method` calls `DELETE` idempotent, which is right for reads like `delete_media` but wrong here: a repeated deregistration is a state change the caller has to see, so `deregister` overrides the verb rule and a 5xx surfaces as `Error::Ambiguous` instead of being re-sent.
 * **No field-level webhook subscription.** The WABA node has no
   `subscribed_fields`; that parameter belongs to the app-level
   `/{app_id}/subscriptions` endpoint, which is out of scope (README).
@@ -79,3 +93,15 @@ Secondary sources — the developer reference pages the spec links to:
   2025-10-23, so they are not modelled. A `country` is checked for shape, not
   against that list: an unsupported market is Meta's decision to reject, and
   guessing the list would turn a future market into a local failure.
+* **Required catalog fields live in the constructor.** For `product_list` the
+  spec makes `header` and `body` mandatory and for `product` it forbids the
+  header; `MultiProductMessage::new` therefore takes header and body, and
+  `SingleProductMessage` has no header field. A shape the wire rejects cannot be
+  built, so no runtime check has to remember it.
+* **Two documented caps the spec omits are enforced.** The `SectionObject` caps
+  `product_items` at 30 *per section*; Meta's reference caps a multi-product
+  message at 30 products overall, and requires a `title` as soon as there is more
+  than one section. Both are checked, because Meta rejects the payload either
+  way and a client-side error names the field.
+* **Catalog and retailer ids are not length-capped.** Neither source gives a
+  maximum, so only emptiness and control characters are refused.

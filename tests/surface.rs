@@ -10,10 +10,13 @@ mod common;
 
 use common::{client, json_response, response, MockTransport};
 use meta_whatsapp::business::{
-    BusinessProfile, BusinessProfileUpdate, MessagingLimitTier, PhoneNumberInfo, QualityRating,
-    PROFILE_WEBSITE_MAX_CHARS,
+    validate_verification_pin, BusinessProfile, BusinessProfileUpdate, MessagingLimitTier,
+    PhoneNumberInfo, QualityRating, PROFILE_WEBSITE_MAX_CHARS,
 };
 use meta_whatsapp::media::{MediaBytes, MediaInfo, MediaRef, MediaUpload, MAX_LINK_LEN};
+use meta_whatsapp::message::{
+    PRODUCTS_MAX, PRODUCT_ITEMS_MAX, PRODUCT_SECTIONS_MAX, PRODUCT_SECTION_TITLE_MAX_CHARS,
+};
 use meta_whatsapp::subscription::{SubscriptionConfig, SubscriptionState, WebhookSubscriptions};
 use meta_whatsapp::template::{
     TemplateButtonType, TemplateComponent, TemplateLanguage, TemplateMediaKind, TemplateParameter,
@@ -24,9 +27,11 @@ use meta_whatsapp::{
     AddressMessage, AudioMessage, ButtonMessage, ContactCard, ContactName, ContactOrg,
     ContactsMessage, DocumentMessage, EmailType, Error, FlowAction, FlowMessage, FlowMode,
     HeaderText, ImageMessage, InteractiveMessage, ListMessage, ListRow, ListSection,
-    LocationMessage, MediaBytes as ReexportedMediaBytes, MessageBody, PhoneType, ReactionMessage,
-    RecipientType, ReplyButton, StickerMessage, TemplateMessage, TextMessage, UrlType,
-    VideoMessage,
+    LocationMessage, MediaBytes as ReexportedMediaBytes, MessageBody, MultiProductMessage,
+    PhoneType, ProductItem, ProductSection, ReactionMessage, RecipientType, RegisterRequest,
+    RegistrationBackup, ReplyButton, SingleProductMessage, StickerMessage, SuccessOutcome,
+    TemplateMessage, TextMessage, TwoStepVerificationRequest, UrlType, VerificationPin,
+    VideoMessage, VERIFICATION_PIN_LEN,
 };
 
 #[test]
@@ -57,6 +62,18 @@ fn every_body_reports_its_wire_type() {
             "interactive",
         ),
         (AddressMessage::new("IN", "b").into(), "interactive"),
+        (
+            InteractiveMessage::Product(SingleProductMessage::new("c", "sku")).into(),
+            "interactive",
+        ),
+        (
+            InteractiveMessage::ProductList(
+                MultiProductMessage::new("c", "Katalog", "Bitte wählen")
+                    .section(ProductSection::from_ids(["sku"])),
+            )
+            .into(),
+            "interactive",
+        ),
         (TemplateMessage::new("t", "de").into(), "template"),
     ];
     for (body, expected) in cases {
@@ -576,6 +593,65 @@ fn contact_cards_cover_every_builder() {
 }
 
 #[test]
+fn catalog_builders_cover_products_and_their_limits() {
+    // The documented caps, named once so a wire change trips a test.
+    assert_eq!(PRODUCT_SECTION_TITLE_MAX_CHARS, 24);
+    assert_eq!(PRODUCT_SECTIONS_MAX, 10);
+    assert_eq!(PRODUCT_ITEMS_MAX, 30);
+    assert_eq!(PRODUCTS_MAX, 30);
+
+    // A product item carries exactly one field and compares by value.
+    let item = ProductItem::new("sku-42");
+    assert_eq!(item.product_retailer_id, "sku-42");
+    assert_eq!(item, item.clone());
+    assert!(item.validate().is_ok());
+    assert!(ProductItem::new("").validate().is_err());
+    assert!(ProductItem::new("sk\u{1}u").validate().is_err());
+
+    // Sections can be built from items or from ids, and grown one product at a
+    // time; `title` is the only optional field.
+    let built = ProductSection::new(vec![ProductItem::new("a")]).item(ProductItem::new("b"));
+    assert_eq!(built.product_items.len(), 2);
+    assert!(built.title.is_none());
+    assert_eq!(
+        ProductSection::from_ids(["a", "b"]).product_items,
+        built.product_items
+    );
+    assert_eq!(
+        ProductSection::from_ids(Vec::<String>::new())
+            .product_items
+            .len(),
+        0,
+        "an id iterator may be empty; the message rejects that"
+    );
+    let titled = ProductSection::from_ids(["a"]).title("ä".repeat(24));
+    assert_eq!(titled.title.as_deref(), Some("ä".repeat(24).as_str()));
+    // Section bounds surface through the message, which owns the context.
+    let with_title = MultiProductMessage::new("c", "Katalog", "Bitte wählen").section(titled);
+    assert!(with_title.validate().is_ok());
+
+    // Single product: both ids required, body and footer optional.
+    let single = SingleProductMessage::new("367025965434465", "sku-42");
+    assert!(single.validate().is_ok());
+    assert_eq!(single.catalog_id, "367025965434465");
+    assert_eq!(single.product_retailer_id, "sku-42");
+    assert!(single.clone().body("Text").body.is_some());
+    assert!(single.footer("Impressum").footer.is_some());
+
+    // Multi product: header and body are part of the constructor because the
+    // contract requires both for `product_list`.
+    let multi = MultiProductMessage::new("146265584024623", "Katalog", "Bitte wählen")
+        .section(ProductSection::from_ids(["a"]))
+        .footer("Versand frei");
+    assert!(multi.validate().is_ok());
+    assert_eq!(multi.header.text, "Katalog");
+    assert_eq!(multi.body, "Bitte wählen");
+    assert_eq!(multi.footer.as_deref(), Some("Versand frei"));
+    assert_eq!(multi.sections.len(), 1);
+    assert_eq!(multi.catalog_id, "146265584024623");
+}
+
+#[test]
 fn interactive_builders_cover_headers_footers_and_sections() {
     let buttons = ButtonMessage::new("body", vec![ReplyButton::new("id", "title")])
         .header(HeaderText::new("h"))
@@ -630,4 +706,112 @@ fn location_and_text_boundaries() {
     // The re-exported alias is the same type.
     let bytes: ReexportedMediaBytes = MediaBytes::new(Vec::new(), None);
     assert!(bytes.is_empty());
+}
+
+#[test]
+fn the_pin_and_its_bodies_show_their_boundaries() {
+    // Accepted side, both edges of the accepted range, both rejected sides.
+    assert_eq!(VERIFICATION_PIN_LEN, 6);
+    assert!(validate_verification_pin("000000").is_ok());
+    assert!(validate_verification_pin("999999").is_ok());
+    assert!(validate_verification_pin("12345").is_err(), "one short");
+    assert!(validate_verification_pin("1234567").is_err(), "one long");
+    assert!(validate_verification_pin("").is_err(), "empty fails closed");
+    assert!(validate_verification_pin("12345a").is_err());
+    assert!(validate_verification_pin("١٢٣٤٥٦").is_err(), "not ASCII");
+
+    let pin = VerificationPin::new("123456").unwrap();
+    assert_eq!(pin, VerificationPin::try_from("123456".to_owned()).unwrap());
+    assert_ne!(pin, VerificationPin::new("123457").unwrap());
+    assert_eq!(format!("{pin:?}"), "VerificationPin([redacted])");
+    assert_eq!(format!("{pin}"), "6-digit PIN (redacted)");
+
+    // A backup needs both parts and prints neither.
+    assert!(RegistrationBackup::new("", "blob").is_err());
+    assert!(RegistrationBackup::new("pw", "").is_err());
+    let backup = RegistrationBackup::new("pw", "blob").unwrap();
+    assert_eq!(
+        backup.to_json(),
+        serde_json::json!({"password": "pw", "data": "blob"})
+    );
+    assert!(!format!("{backup:?}").contains("blob"), "{backup:?}");
+
+    assert_eq!(
+        RegisterRequest::new(&pin).to_json(),
+        serde_json::json!({"messaging_product": "whatsapp", "pin": "123456"})
+    );
+    assert_eq!(
+        RegisterRequest::new(&pin).with_backup(&backup).to_json(),
+        serde_json::json!({
+            "messaging_product": "whatsapp",
+            "pin": "123456",
+            "backup": {"password": "pw", "data": "blob"}
+        })
+    );
+    assert_eq!(
+        TwoStepVerificationRequest::new(&pin).to_json(),
+        serde_json::json!({"pin": "123456"})
+    );
+
+    // Every documented spelling of the answer, plus the ones that cannot work.
+    for (body, success) in [
+        (serde_json::json!({"success": true}), true),
+        (serde_json::json!({"success": false}), false),
+        (serde_json::json!({"success": "true"}), true),
+        (serde_json::json!({"success": 0}), false),
+        (serde_json::json!({}), false),
+    ] {
+        assert_eq!(
+            SuccessOutcome::from_value(&body).unwrap().success,
+            success,
+            "{body}"
+        );
+    }
+    assert!(SuccessOutcome::from_value(&serde_json::json!([])).is_err());
+    assert!(SuccessOutcome::from_value(&serde_json::json!({"success": []})).is_err());
+    assert!(!SuccessOutcome::default().success);
+}
+
+#[tokio::test]
+async fn the_lifecycle_calls_each_send_exactly_once() {
+    let pin = VerificationPin::new("123456").unwrap();
+
+    for name in ["register", "deregister", "set_pin"] {
+        let transport = MockTransport::new();
+        transport.push_response(json_response(&serde_json::json!({
+            "success": true, "messaging_product": "whatsapp"
+        })));
+        let client = client(transport.clone());
+
+        let outcome = match name {
+            "register" => client.register(&pin).await,
+            "deregister" => client.deregister().await,
+            _ => client.set_two_step_verification_pin(&pin).await,
+        }
+        .unwrap_or_else(|err| panic!("{name}: {err:?}"));
+
+        assert!(outcome.success, "{name}");
+        assert_eq!(outcome.messaging_product.as_deref(), Some("whatsapp"));
+        assert_eq!(transport.call_count(), 1, "{name} sent exactly once");
+    }
+
+    // The backup variant, and the URL builders next to it.
+    let transport = MockTransport::new();
+    transport.push_response(json_response(&serde_json::json!({"success": true})));
+    let client = client(transport.clone());
+    let backup = RegistrationBackup::new("pw", "blob").unwrap();
+    assert!(
+        client
+            .register_with_backup(&pin, &backup)
+            .await
+            .unwrap()
+            .success
+    );
+    assert_eq!(transport.call_count(), 1);
+    assert!(client.register_url().ends_with("/register"));
+    assert!(client.deregister_url().ends_with("/deregister"));
+    assert_eq!(
+        client.two_step_verification_url(),
+        client.phone_number_url()
+    );
 }

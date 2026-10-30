@@ -27,7 +27,80 @@ of the README.
   payload, property tests for the byte limits and the wire round-trip, and an
   `address_message` seed for the existing `webhook_payload` fuzz target, which
   now decodes every `nfm_reply` it meets.
+- Catalog product messages (#19): `SingleProductMessage` (`interactive.type`
+  `product`) and `MultiProductMessage` (`product_list`) with `ProductSection` and
+  `ProductItem`, plus the matching `InteractiveMessage::Product` /
+  `InteractiveMessage::ProductList` variants and `From` conversions into
+  `InteractiveMessage` and `MessageBody`. The contract's asymmetries are in the
+  types rather than in a runtime check: `product_list` needs a text header and a
+  body, so `MultiProductMessage::new` takes both, while `product` forbids a
+  header and allows the body to be omitted, so `SingleProductMessage` has no
+  header field at all.
+- Catalog limits as named constants: `PRODUCT_SECTIONS_MAX` (10),
+  `PRODUCT_ITEMS_MAX` (30 per section), `PRODUCTS_MAX` (30 in the whole message,
+  Meta's reference cap on top of the per-section one) and
+  `PRODUCT_SECTION_TITLE_MAX_CHARS` (24). Section titles are required once a
+  message has more than one section, and `catalog_id` / `product_retailer_id`
+  must be present and printable before anything is rendered —
+  `Error::Validation` names the offending wire field.
+- Tests: four recording-transport tests pinning the exact JSON body of both
+  families (`tests/messages.rs`), a boundary matrix for each limit including
+  multi-byte titles and the 30/31-product split across sections, a proptest
+  pinning multi-product acceptance to the documented envelope, and the new
+  builders added to the surface sweep.
+- Phone-number lifecycle (#13): `WhatsAppClient::register`,
+  `WhatsAppClient::register_with_backup`, `WhatsAppClient::deregister` and
+  `WhatsAppClient::set_two_step_verification_pin`, with the matching
+  `register_url`, `deregister_url` and `two_step_verification_url` builders. A
+  freshly provisioned number cannot send at all until `register` succeeds, so
+  this closed the last per-number gap in the README's tracked list; the
+  WABA-level onboarding surface stays with issue #9.
+- `VerificationPin`, a newtype for the six-digit registration / two-step PIN. It
+  cannot be constructed unless the value is exactly six ASCII digits (ASCII
+  only: `１２３４５６` and `١٢٣٤٥٦` are six characters and are refused), it is
+  `Debug`- and `Display`-redacted, has no getter, no `Hash` and no `Default`,
+  and compares in constant time. The PIN never appears in a `Display`, `Debug`
+  or error message, and it is validated before anything is allocated or sent.
+  `RegistrationBackup` redacts its password and blob the same way.
+- `SuccessOutcome` for the `{"success": true}` answer all three calls give back,
+  plus `RegisterRequest` and `TwoStepVerificationRequest` for the bodies.
+  Permissive as elsewhere: a missing flag, `1`/`0` and `"true"`/`"1"` all
+  decode, and unknown fields survive in `extra`.
+- Delivery correctness for these writes: they are non-idempotent, so a 5xx or an
+  answer lost after the write surfaces as `Error::Ambiguous` and is never
+  re-sent, while 429 and pre-write failures stay retryable. `deregister`
+  overrides the verb rule — `DELETE` is normally idempotent, deregistering twice
+  is not — via `execute_with(…, Repeatability::NotIdempotent)`. The decision
+  remains the same pure `RetryPolicy::decide`.
+- Two-step verification can be set and rotated but **not** disabled: the
+  reference offers no endpoint for it, and the rustdoc says so instead of
+  implying a `disable` is missing.
+- Tests: `tests/lifecycle.rs` (14 tests — wire shape per call, the PIN boundary
+  pairs including unicode digits, and an assertion that the PIN appears in no
+  `Debug`/`Display` string of any request or error type), six lifecycle
+  delivery cases in `tests/delivery.rs` including a 32-task hammer test on a
+  cloned client, and three properties in `tests/properties.rs`.
 
+### Changed
+- `transport::Request` and `RequestBody` now redact in `Debug`: the access token
+  is replaced with `[redacted]`, and so is any body field named `pin`,
+  `password`, `backup`, `token`, `access_token`, `verify_token` or `app_secret`,
+  recursively. A transport can log a whole request without leaking a PIN.
+
+### Fixed
+- `Retry-After` is no longer shortened to `max_delay` (#14). The hint is the
+  server's own schedule: `RetryPolicy::delay` now waits it out verbatim while it
+  fits under `max_delay`, and a longer hint answers `Action::Surface` instead of
+  a truncated wait. The caller sees the 429 with `retry_after()` intact and
+  `is_retryable() == true`, so it can schedule the wait the server asked for;
+  waiting less used to guarantee a second 429 and burn one of the attempts.
+  `max_delay` now decides *whether* a hint is acceptable, never how much of it
+  to wait — the backoff curve is still clamped by it, and
+  `without_retry_after()` still hands the decision to the curve. The boundary is
+  pinned to the nanosecond in `src/retry.rs`, `tests/delivery.rs`,
+  `tests/client.rs` (a 3600 s hint is slept for exactly 3600 s of paused time;
+  3601 s against a 3600 s ceiling is not slept at all) and by two new properties
+  in `tests/properties.rs`.
 ## [0.1.5] - 2026-10-27
 
 ### Changed

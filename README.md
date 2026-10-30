@@ -57,13 +57,18 @@ Sending a message is **not** safely repeatable: the Cloud API has no idempotency
 key, so a second POST is a second message on the recipient's phone. The client
 therefore automates only the retries that cannot duplicate anything:
 
-| Failure | Non-idempotent (`POST` send/upload) | Idempotent (`GET`, `DELETE`) |
+| Failure | Non-idempotent (`POST` send/upload/register, `deregister`) | Idempotent (`GET`, other `DELETE`) |
 | --- | --- | --- |
-| 429 rate limited | retried, honours `Retry-After` | retried, honours `Retry-After` |
+| 429 rate limited | retried; `Retry-After` waited out verbatim, surfaced if it exceeds `max_delay` | same |
 | DNS / connect / TLS failure (before the write) | retried | retried |
 | 5xx | **not retried** → `Error::Ambiguous` | retried with backoff |
 | Timeout or reset after the write | **not retried** → `Error::Ambiguous` | retried |
 | Other 4xx | terminal | terminal |
+
+`deregister` is the one `DELETE` in the table's left column: deregistering twice is a
+state change the caller has to see, so it overrides the verb rule
+(`Repeatability::of_method`) and is treated as non-idempotent, exactly like
+`register` and `set_two_step_verification_pin`.
 
 `Error::Ambiguous` means *the message may or may not have been delivered*:
 `is_retryable()` is `false`, `is_ambiguous()` is `true`, `status()` carries the
@@ -108,6 +113,7 @@ validates before rendering, so an invalid message never reaches the network.
 | contacts | `ContactsMessage` + `ContactCard` | name, phones, e-mails, org, URLs, birthday |
 | reaction | `ReactionMessage` | empty emoji removes a reaction |
 | interactive | `ButtonMessage`, `ListMessage`, `FlowMessage`, `AddressMessage` | 1–3 buttons, 1–10 list rows, flows, address forms |
+| catalog products | `SingleProductMessage`, `MultiProductMessage` + `ProductSection` | one product card, or up to 30 products in up to 10 sections |
 | template | `TemplateMessage` | text/currency/date-time/media parameters, header/body/button merges |
 
 Envelope-level features: reply context (`context.message_id`),
@@ -146,6 +152,16 @@ The answer comes back as an `nfm_reply` webhook whose `response_json` is a JSON
 decodes it into `AddressValues`, keeping keys the crate does not model in
 `extra`.
 
+Catalog product messages (`interactive.type` `product` and `product_list`) need a
+catalog linked to the WhatsApp Business Account. The wire pins the shapes
+unevenly, so the types follow it: `product_list` requires a text header and a
+body — both are constructor arguments of `MultiProductMessage` — while `product`
+forbids a header and allows the body to be omitted, so `SingleProductMessage`
+has no header field at all and an optional `body`. A multi-product message takes
+1–10 sections; every section needs a title once there is more than one, carries
+1–30 products, and the message holds at most 30 products in total. Section titles
+are 24 characters, header and footer 60, the body 1024 bytes.
+
 ## Media
 
 * `upload_media` POSTs `multipart/form-data` to `/{phone_number_id}/media` and returns the id.
@@ -173,11 +189,21 @@ Account administration for the number the client is bound to:
 | --- | --- | --- |
 | `business_profile` | `GET /{phone_number_id}/whatsapp_business_profile` | `BusinessProfile` (about, address, description, e-mail, websites, vertical) |
 | `update_business_profile` | `POST /{phone_number_id}/whatsapp_business_profile` | `{"success": true}` |
+| `register` | `POST /{phone_number_id}/register` | `SuccessOutcome` (`{"success": true}`) — a number cannot send until this succeeds |
+| `register_with_backup` | same, plus `backup{password,data}` | same, migrating an on-premises account in the same call |
+| `deregister` | `DELETE /{phone_number_id}/deregister` | `SuccessOutcome` |
+| `set_two_step_verification_pin` | `POST /{phone_number_id}` (body `pin` only) | `SuccessOutcome` — the only spelling; the API cannot disable two-step verification |
 | `phone_number_info` | `GET /{phone_number_id}?fields=…` | `PhoneNumberInfo` (quality rating, messaging-limit tier, account mode, display-name and 2FA status) |
 | `phone_number_info_with` | same, explicit field list | same, but you choose the fields |
 | `blocked_users` | `GET /{phone_number_id}/block_users` | `BlockedUsersPage` (with paging) |
 | `block_users` | `POST /{phone_number_id}/block_users` | `BlockOutcome` (`added_users`) |
 | `unblock_users` | `DELETE /{phone_number_id}/block_users` (ids in the body) | `BlockOutcome` (`removed_users`) |
+
+The three lifecycle writes take or return a `VerificationPin`: a value that only
+exists if it is exactly six ASCII digits, is `Debug`- and `Display`-redacted, has
+no getter and no `Default`, and never appears in an error message. They are
+non-idempotent — a 5xx or a lost answer is `Error::Ambiguous`, never a silent
+re-send (see *Delivery semantics*).
 
 Quality and limits are typed but permissive: `QualityRating` (GREEN/YELLOW/RED/NA)
 and `MessagingLimitTier` (TIER_50 … TIER_UNLIMITED) keep an unknown value as
@@ -230,8 +256,13 @@ with a token the API just rejected.
 * Only 429 and pre-write connection failures are retried automatically; see
   [Delivery semantics](#delivery-semantics).
 * Backoff is exponential and exact, bounded by `RetryPolicy` (default 3
-  attempts, 250 ms doubling to an 8 s ceiling); `Retry-After` is honoured and
-  clamped to `max_delay`.
+  attempts, 250 ms doubling to an 8 s ceiling). A `Retry-After` hint is
+  authoritative and is never shortened: it is waited out verbatim while it fits
+  under `max_delay`, and a longer hint surfaces the 429 (still
+  `is_retryable()`, with `retry_after()` intact) so the caller can schedule it —
+  waiting less than the server asked for only earns a second 429 and burns an
+  attempt. `max_delay` therefore decides *whether* to retry, not how long;
+  `without_retry_after()` ignores the header and lets the curve decide.
 * Per-request timeout via `WhatsAppClient::with_timeout`; waits use
   `tokio::time::sleep` (cancellation safe). Without the `http` feature there is
   no timer to await, so retries happen immediately — bring your own pacing.
@@ -276,6 +307,17 @@ to need a patch release — `docs/contracts.md` records the sources:
   `interactive.type = nfm_reply` and as `type = interactive` with
   `action = address_message`; `AddressReply` reads the `nfm_reply` block that
   both shapes carry.
+* **`success` on the lifecycle calls.** The reference types it as a boolean, but the
+  field is also seen as `1`/`0`, as `"true"`/`"1"`, or absent. `SuccessOutcome`
+  accepts every one of those and reads a missing flag as `false`; only a body that
+  cannot be an object at all is an error.
+* **`backup{password,data}` on register.** The migration blob for an on-premises
+  Business API move; the OpenAPI description does not pin the shape down, so both
+  parts are opaque strings here and the caller supplies whatever its export produced.
+* **Catalog ids and retailer ids.** The spec types both as plain strings and gives
+  no maximum length, so neither is capped; they are checked for emptiness and
+  control characters only. Whether an id exists in the catalog is Meta's answer,
+  not ours.
 
 ## Tracked gaps
 
@@ -283,10 +325,14 @@ A Cloud API surface this crate does not implement is an issue, not an exclusion.
 The list below is the shortcut; the issue is the contract, and an entry leaves
 this section when its issue closes.
 
-* **Catalog / product / order messages** — issues #19, #20 and #21, the
-  children of #7. Commerce payloads with their own schema churn;
-  `MessageBody` stays `#[non_exhaustive]` so they can land without a breaking
-  release.
+* **Catalog product messages are covered** (`SingleProductMessage`,
+  `MultiProductMessage`, issue #19) and so are address messages
+  (`AddressMessage`, issue #22). What is still open from issue #7 are the
+  **order messages** (`interactive.type` `order_details`), which carry their own
+  schema churn; `MessageBody` stays `#[non_exhaustive]` so they can land without
+  a breaking release. The `catalog_message` action (`{name: "catalog_message"}`
+  with a thumbnail product) is not implemented either: it is a catalog-level
+  "view catalog" entry point, not a product card, and belongs to its own issue.
 * **Flow data-exchange endpoints** — issue #8. Until then the inbound
   `nfm_reply` payload of a Flow is passed through raw
   (`InteractiveReply::nfm_reply`; address replies do have a typed decoder,
@@ -295,8 +341,10 @@ this section when its issue closes.
 * **App-level webhook field subscription** (`/{app_id}/subscriptions`) and
   registering the callback URL itself — issue #9.
 * **WABA-level phone-number listing / onboarding** (`GET|POST /{waba_id}/phone_numbers`,
-  `register`, `request_code`) — issue #9. The per-number quality and limits
-  *are* covered above.
+  its `register`, `request_code`) — issue #9. The per-number quality and limits *and*
+  the per-number lifecycle (register / deregister / two-step PIN) *are* covered above;
+  what is left is enumerating and onboarding numbers from the WABA node, where the
+  code request has no per-number PIN.
 
 The only exclusion that does not need an issue is a surface the provider does
 not offer, or has deprecated — and then the README says which, with a link.
@@ -309,7 +357,7 @@ cargo test --no-default-features    # same, without reqwest/tokio
 cargo clippy --all-targets --all-features -- -D warnings
 cargo doc --no-deps
 cargo deny check
-cargo llvm-cov --all-features --summary-only   # 96.8 % lines, gate at 95 %
+cargo llvm-cov --all-features --summary-only   # 95.6 % lines, gate at 95 %
 cargo fuzz run webhook_payload      # nightly; one target per parser, see below
 ```
 
@@ -333,7 +381,7 @@ The suite has five layers:
   percent-encoded, an address value survives the wire unchanged, and "no
   non-idempotent request is retried after a 5xx" holds for every status, budget
   and attempt count.
-* **Doctest** — every public item has a runnable example (441 doctests).
+* **Doctest** — every public item has a runnable example (488 doctests).
 * **Fuzz** (`fuzz/`, nightly) — one libFuzzer target per parser, each pinning the
   invariant it protects instead of only "does not panic":
   * `webhook_payload` — arbitrary JSON through the permissive parser; a key the

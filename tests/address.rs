@@ -334,6 +334,13 @@ fn saved_addresses_need_a_usable_id_and_at_least_one_field() {
             .validate()
             .is_ok()
     );
+    // The id ceiling itself is legal — 1024 bytes is the boundary.
+    assert!(SavedAddress::new(
+        "i".repeat(ADDRESS_FIELD_MAX_BYTES),
+        AddressValues::new().city("Pune"),
+    )
+    .validate()
+    .is_ok());
 
     for (saved, field) in [
         (
@@ -384,6 +391,13 @@ fn saved_address_ids_must_be_unique() {
 
 #[test]
 fn validation_errors_need_a_named_field_and_a_message() {
+    // Both strings sit at their ceiling — 1024 bytes is legal on each.
+    assert!(AddressValidationError::new(
+        "f".repeat(ADDRESS_FIELD_MAX_BYTES),
+        "m".repeat(ADDRESS_FIELD_MAX_BYTES),
+    )
+    .validate()
+    .is_ok());
     assert_rejected(
         &MessageRequest::new(
             "919876543210",
