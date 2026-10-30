@@ -84,6 +84,11 @@ Secondary sources — the developer reference pages the spec links to:
 * **No field-level webhook subscription.** The WABA node has no
   `subscribed_fields`; that parameter belongs to the app-level
   `/{app_id}/subscriptions` endpoint, which is out of scope (README).
+* **`flow_message_version` is fixed at the documented `"3"`.** The issue that
+  requested `FlowMessage` listed the version as a settable field; it is instead
+  emitted as the value Meta's own examples use, because a caller-chosen version
+  can only be wrong on the wire. Nothing in the docs shows another supported
+  value, so making it an option would invent a knob.
 * **Commerce order variants.** The v23 OpenAPI example also contains a newer
   `review_and_pay` payment flow. This crate implements the established
   `review_order` order-details/status contract; the payment-specific shape is
