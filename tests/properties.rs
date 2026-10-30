@@ -11,10 +11,14 @@ use meta_whatsapp::business::{
 use meta_whatsapp::media::{validate_media_id, MAX_MEDIA_ID_LEN};
 use meta_whatsapp::retry::{Action, Attempt, Repeatability};
 use meta_whatsapp::subscription::{validate_waba_id, WebhookSubscriptions};
+use meta_whatsapp::template::{
+    TemplateDefinitionComponent, TEMPLATE_HEADER_MAX_CHARS, TEMPLATE_NAME_MAX_BYTES,
+};
 use meta_whatsapp::transport::Method;
 use meta_whatsapp::usage::BusinessUseCaseUsage;
 use meta_whatsapp::{
-    Error, MessageRequest, RetryPolicy, TemplateQuery, TextMessage, WebhookPayload, WebhookVerifier,
+    Error, MessageRequest, RetryPolicy, TemplateCategory, TemplateDefinition, TemplateQuery,
+    TemplateUpdate, TextMessage, WebhookPayload, WebhookVerifier,
 };
 use percent_encoding::percent_decode_str;
 use proptest::prelude::*;
@@ -503,6 +507,57 @@ proptest! {
             prop_assert!(payload.get("address").is_none());
             prop_assert!(payload["websites"][0].is_string());
         }
+    }
+
+    /// A template definition is accepted exactly when its name is non-empty and
+    /// at most `TEMPLATE_NAME_MAX_BYTES` bytes long.
+    #[test]
+    fn template_name_acceptance_matches_the_boundary(name in ".{0,600}") {
+        let definition = TemplateDefinition::new(&name, "de", TemplateCategory::Utility)
+            .body_text("Danke für Ihren Einkauf");
+        let expected = !name.is_empty() && name.len() <= TEMPLATE_NAME_MAX_BYTES;
+        prop_assert_eq!(definition.validate().is_ok(), expected);
+    }
+
+    /// A header text is accepted exactly when it is non-empty, at most
+    /// `TEMPLATE_HEADER_MAX_CHARS` characters long and free of placeholders
+    /// (which would need an example).
+    #[test]
+    fn header_text_acceptance_matches_the_boundary(text in ".{0,80}") {
+        let accepted = TemplateDefinitionComponent::header_text(&text)
+            .validate()
+            .is_ok();
+        let expected = !text.is_empty()
+            && text.chars().count() <= TEMPLATE_HEADER_MAX_CHARS
+            && !text.contains("{{");
+        prop_assert_eq!(accepted, expected);
+    }
+
+    /// Whatever validates renders with the same name, language and body text —
+    /// the payload cannot drift from what was checked.
+    #[test]
+    fn template_definitions_render_what_they_validated(text in "[^{}]{1,200}") {
+        let definition = TemplateDefinition::new("order_update", "de_DE", TemplateCategory::Utility)
+            .body_text(&text);
+        let payload = definition.render().unwrap();
+        prop_assert_eq!(&payload["name"], &Value::String("order_update".into()));
+        prop_assert_eq!(&payload["language"], &Value::String("de_DE".into()));
+        prop_assert_eq!(&payload["components"][0]["text"], &Value::String(text));
+        prop_assert_eq!(payload["components"].as_array().unwrap().len(), 1);
+    }
+
+    /// An edit is accepted exactly when it carries a category or a component,
+    /// on top of a valid name and language.
+    #[test]
+    fn template_update_acceptance_matches_the_rule(with_category in any::<bool>(), with_body in any::<bool>()) {
+        let mut update = TemplateUpdate::new("order_update", "de");
+        if with_category {
+            update = update.category(TemplateCategory::Utility);
+        }
+        if with_body {
+            update = update.component(TemplateDefinitionComponent::body_text("Danke"));
+        }
+        prop_assert_eq!(update.validate().is_ok(), with_category || with_body);
     }
 }
 

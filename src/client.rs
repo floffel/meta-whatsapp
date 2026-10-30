@@ -43,7 +43,10 @@ use crate::retry::{Action, Attempt, Repeatability, RetryPolicy};
 use crate::subscription::{
     validate_waba_id, SubscriptionConfig, SubscriptionState, WebhookSubscriptions,
 };
-use crate::template::{TemplateList, TemplateQuery};
+use crate::template::{
+    encode_query_value, validate_template_name, validate_template_owner_id, TemplateAck,
+    TemplateDefinition, TemplateDeleteAck, TemplateList, TemplateQuery, TemplateUpdate,
+};
 use crate::transport::{Request, Response, Transport};
 use crate::usage::BusinessUseCaseUsage;
 
@@ -679,6 +682,151 @@ impl<T: Transport> WhatsAppClient<T> {
         };
         let response = self.execute(Request::get(&url, &self.token)).await?;
         serde_json::from_slice(response.body()).map_err(Error::from)
+    }
+
+    /// The template-management endpoint for the bound phone number.
+    ///
+    /// It does not validate the id: [`WhatsAppClient::create_template`] and its
+    /// siblings do that before they build a request.
+    ///
+    /// ```
+    /// # use meta_whatsapp::{Result, Transport, WhatsAppClient, transport::{Request, Response}};
+    /// # struct Mock;
+    /// # impl Transport for Mock {
+    /// #     async fn execute(&self, _: Request<'_>) -> Result<Response> {
+    /// #         Ok(Response::new(200, std::iter::empty(), b"{}".to_vec()))
+    /// #     }
+    /// # }
+    /// assert!(WhatsAppClient::new("106540352242922", "t", Mock)
+    ///     .message_templates_url()
+    ///     .ends_with("/v21.0/106540352242922/message_templates"));
+    /// ```
+    #[must_use]
+    pub fn message_templates_url(&self) -> String {
+        self.url(&format!("{}/message_templates", self.phone_number_id))
+    }
+
+    /// Creates a template and returns Meta's acknowledgement.
+    ///
+    /// The definition is validated before the request, so an invalid one never
+    /// reaches the network. `POST` here is not repeatable — Meta assigns a new
+    /// template id per call — so a 5xx or a lost response surfaces as
+    /// [`Error::Ambiguous`] and is never re-sent.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use meta_whatsapp::{ReqwestTransport, TemplateCategory, TemplateDefinition, WhatsAppClient};
+    ///
+    /// let client = WhatsAppClient::new("106540352242922", "EAAG...", ReqwestTransport::new());
+    /// let definition = TemplateDefinition::new("order_update", "de", TemplateCategory::Utility)
+    ///     .body_text("Hallo {{1}}, Ihre Bestellung ist unterwegs.")
+    ///     .body_example("Florian");
+    /// let ack = client.create_template(&definition).await?;
+    /// println!("{:?} {:?}", ack.id, ack.status);
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an unsafe phone number id or an invalid
+    /// definition; then transport, Graph API and decoding errors, with a 5xx as
+    /// [`Error::Ambiguous`].
+    pub async fn create_template(&self, definition: &TemplateDefinition) -> Result<TemplateAck> {
+        validate_template_owner_id(&self.phone_number_id)?;
+        let payload = definition.render()?;
+        let url = self.message_templates_url();
+        let response = self
+            .execute(Request::post_json(&url, &self.token, &payload))
+            .await?;
+        TemplateAck::from_value(&response.json()?)
+    }
+
+    /// Edits an existing template (name plus language identify it).
+    ///
+    /// Meta's `Edit template` operation is a `POST` on the same node as the
+    /// create call, with `name` and `language` selecting the template; the edit
+    /// replaces the stored definition, so repeating it leaves the same state and
+    /// a 5xx is retried.
+    ///
+    /// ```
+    /// # use meta_whatsapp::{Result, Transport, WhatsAppClient, transport::{Request, Response}};
+    /// # use meta_whatsapp::template::{TemplateDefinitionComponent, TemplateUpdate};
+    /// # struct Mock;
+    /// # impl Transport for Mock {
+    /// #     async fn execute(&self, request: Request<'_>) -> Result<Response> {
+    /// #         assert_eq!(request.method.as_str(), "POST");
+    /// #         assert!(request.url.ends_with("/message_templates"));
+    /// #         Ok(Response::new(200, std::iter::empty(), br#"{"success":true}"#.to_vec()))
+    /// #     }
+    /// # }
+    /// # async fn demo() -> Result<()> {
+    /// let client = WhatsAppClient::new("106540352242922", "t", Mock);
+    /// let update = TemplateUpdate::new("order_update", "de")
+    ///     .component(TemplateDefinitionComponent::footer_text("Danke"));
+    /// let ack = client.update_template(&update).await?;
+    /// assert_eq!(ack.success, Some(true));
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an unsafe phone number id or an edit that
+    /// changes nothing; then transport, Graph API and decoding errors.
+    pub async fn update_template(&self, update: &TemplateUpdate) -> Result<TemplateAck> {
+        validate_template_owner_id(&self.phone_number_id)?;
+        let payload = update.render()?;
+        let url = self.message_templates_url();
+        // `POST` is not repeatable in general, but an edit is: it carries the
+        // whole new definition for one name and language, so re-sending it
+        // writes the same state instead of a second template.
+        let response = self
+            .execute_with(
+                Request::post_json(&url, &self.token, &payload),
+                Repeatability::Idempotent,
+            )
+            .await?;
+        TemplateAck::from_value(&response.json()?)
+    }
+
+    /// Deletes every language version of a template by name.
+    ///
+    /// The name travels in the query string, percent-encoded, and is validated
+    /// first. Deleting twice leaves the same state, so a 5xx is retried.
+    ///
+    /// ```
+    /// # use meta_whatsapp::{Result, Transport, WhatsAppClient, transport::{Request, Response}};
+    /// # struct Mock;
+    /// # impl Transport for Mock {
+    /// #     async fn execute(&self, request: Request<'_>) -> Result<Response> {
+    /// #         assert_eq!(request.method.as_str(), "DELETE");
+    /// #         assert!(request.url.ends_with("/message_templates?name=order_update"));
+    /// #         Ok(Response::new(200, std::iter::empty(), br#"{"success":true}"#.to_vec()))
+    /// #     }
+    /// # }
+    /// # async fn demo() -> Result<()> {
+    /// let client = WhatsAppClient::new("106540352242922", "t", Mock);
+    /// assert!(client.delete_template("order_update").await?.is_success());
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an unsafe phone number id or an empty or
+    /// over-long name; then transport, Graph API and decoding errors.
+    pub async fn delete_template(&self, name: &str) -> Result<TemplateDeleteAck> {
+        validate_template_owner_id(&self.phone_number_id)?;
+        validate_template_name(name)?;
+        let url = format!(
+            "{}?name={}",
+            self.message_templates_url(),
+            encode_query_value(name)
+        );
+        let response = self.execute(Request::delete(&url, &self.token)).await?;
+        TemplateDeleteAck::from_value(&response.json()?)
     }
 
     /// The business-profile endpoint for the bound phone number.

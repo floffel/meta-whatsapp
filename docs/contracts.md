@@ -29,6 +29,9 @@ Secondary sources — the developer reference pages the spec links to:
 | `media_info`, `download_media`, `delete_media` | `GET|DELETE /{media-id}` | `/{Version}/{Media-ID}` |
 | `download_from_url` | `GET {lookaside URL}` | `/{Version}/{Media-URL}` |
 | `list_templates` | `GET /{waba-id}/message_templates` | `/{Version}/{WABA-ID}/message_templates` |
+| `create_template` | `POST /{phone-number-id}/message_templates` | `/{Version}/{WABA-ID}/message_templates` (POST) |
+| `update_template` | `POST /{phone-number-id}/message_templates` | same (`Edit template`) |
+| `delete_template` | `DELETE /{phone-number-id}/message_templates?name=…` | same (`Delete template by name`) |
 | `business_profile` | `GET /{phone-number-id}/whatsapp_business_profile` | `/{Version}/{Phone-Number-ID}/whatsapp_business_profile` |
 | `update_business_profile` | `POST /{phone-number-id}/whatsapp_business_profile` | same |
 | `phone_number_info`, `phone_number_info_with` | `GET /{phone-number-id}?fields=…` | `/{Version}/{Phone-Number-ID}` |
@@ -53,11 +56,22 @@ Secondary sources — the developer reference pages the spec links to:
 | `SubscriptionConfig` | `SubscriptionRequest` | `override_callback_uri`, `verify_token`. |
 | `BusinessUseCaseUsage` / `UseCaseUsage` | header `x-business-use-case-usage` | Header value is a JSON object keyed by business id, each value an array of `{type, call_count, total_cputime, total_time, estimated_time_to_regain_access}`. |
 | `CatalogMessage` / `ProductMessage` / `ProductListMessage` | `InteractiveObject`, `ActionObject` | `catalog_message` uses `action.name = catalog_message` and `thumbnail_product_retailer_id`; `product` and `product_list` use `catalog_id` plus `product_retailer_id` or `sections`. Product lists require a text header. Limits: 10 sections, 30 products total, 24-character section titles, 60-character header/footer, 1024-byte body. |
+| `TemplateDefinition` / `TemplateUpdate` | `Create template` and `Edit template` request bodies | `name`, `language` (string, not the send-side object), `category`, `components[]` with `HEADER`/`BODY`/`FOOTER`/`BUTTONS`. Header formats TEXT, IMAGE, VIDEO, DOCUMENT, LOCATION; button types QUICK_REPLY, URL, COPY_CODE, PHONE_NUMBER, OTP. Limits: name 512 bytes, language 32 characters, header/footer 60 characters, body 1024 bytes, button label 25 characters, URL 2000 characters, copy-code example 15 characters, 10 buttons (max 2 URL, max 1 copy-code), 20 examples per component, 4 components, code expiration 1–90 minutes. Authentication templates use `add_security_recommendation` instead of body text and `code_expiration_minutes` in the footer. |
+| `TemplateAck` / `TemplateDeleteAck` | create, edit and delete responses | Create answers `{id, status, category}`, edit and delete `{ "success": true }`. Every field is optional and unknown members are kept. |
 | `OrderDetailsMessage` / `OrderStatusMessage` | `InteractiveObject`, `ActionObject` examples | The existing order-details contract uses `order_details` with `action.name = review_order`, `reference_id`, and an order of `catalog_id` plus `product_items`. Status updates use `order_status` with the same action name and `order.status`. Limits: 30 items, 35-character reference id, quantity >= 1, finite non-negative prices, three-letter uppercase currency. |
 | `Order` / `OrderItem` | `OrderMessage.order` | Inbound `type: "order"` items; snake_case and camelCase aliases both parse, as do numeric strings for `quantity` and `item_price`. Unknown members stay in `extra`. |
 | `AddressMessage` / `AddressReply` | not present in the v23 OpenAPI file | Shape comes from the Cloud API address-message guide: `interactive.type = address_message`, `action.name = address_message`, parameters `country`, `values[]` and `saved_addresses[]`. Unknown field types and members are carried. |
 
 ## Deliberate divergences
+
+* **Template management is phone-number scoped, and the edit is a POST.** The
+  v23 OpenAPI file documents `POST`/`DELETE` on `/{WABA-ID}/message_templates`;
+  the client addresses `/{phone_number_id}/message_templates` (the node it is
+  bound to) with the same request bodies, as issue #10 asks for. The edit uses
+  Meta's `Edit template` operation — a `POST` with `name` and `language`
+  selecting the template. Issue #10 named a `PUT`; no `PUT` exists in the v23
+  file or in the template-management guide, so the documented verb is used. A
+  `PUT` on that edge would be rejected by the API.
 
 * **Response envelopes are unwrapped permissively.** Where the spec and the
   reference disagree (profile, phone number, subscribed apps), the parser accepts

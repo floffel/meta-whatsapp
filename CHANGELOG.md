@@ -10,6 +10,17 @@ of the README.
 ## [Unreleased]
 
 ### Added
+- Template management: `create_template`, `update_template` and
+  `delete_template`, the typed `TemplateDefinition` / `TemplateUpdate` builders
+  (text and media headers, body, footer, quick-reply/URL/copy-code/phone-number/
+  OTP buttons, authentication templates with `add_security_recommendation` and
+  `code_expiration_minutes`), and the permissive `TemplateAck` /
+  `TemplateDeleteAck` responses. Every limit has a named constant in
+  `meta_whatsapp::template` and every limit is tested from both sides. Creating
+  stays non-idempotent (5xx → `Error::Ambiguous`, no re-send); the edit is a
+  `POST` too — Meta's `Edit template` operation, no `PUT` exists for it — but it
+  replaces one name/language pair, so the client retries it like the delete.
+  Closes #10.
 - Catalog, single-product, multi-product, order-details, order-status and
   address messages, with typed validation and named limit constants in
   `meta_whatsapp::commerce`.

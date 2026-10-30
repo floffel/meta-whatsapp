@@ -536,6 +536,70 @@ async fn client_surface_covers_urls_getters_and_downloads() {
 }
 
 #[test]
+fn template_management_covers_the_remaining_arms() {
+    use meta_whatsapp::template::{
+        TemplateDefinitionComponent, TemplateHeaderFormat, TemplateParameterFormat,
+    };
+    use meta_whatsapp::{
+        TemplateAck, TemplateButton, TemplateCategory, TemplateDefinition, TemplateDeleteAck,
+    };
+
+    // A header example without a header leaves the text unset, so validation
+    // fails instead of inventing a header text.
+    let orphan = TemplateDefinition::new("t", "de", TemplateCategory::Utility).header_example("x");
+    assert!(orphan.validate().is_err());
+
+    // Every category and both parameter formats have their wire spelling.
+    for (category, text) in [
+        (TemplateCategory::Marketing, "MARKETING"),
+        (TemplateCategory::Utility, "UTILITY"),
+        (TemplateCategory::Authentication, "AUTHENTICATION"),
+    ] {
+        assert_eq!(category.as_str(), text);
+    }
+    assert_eq!(TemplateCategory::default(), TemplateCategory::Marketing);
+    assert_eq!(
+        TemplateParameterFormat::default(),
+        TemplateParameterFormat::Positional
+    );
+
+    // Component constructors report their wire kind; a footer ignores an
+    // example instead of panicking.
+    assert_eq!(
+        TemplateDefinitionComponent::header_media(TemplateHeaderFormat::Image, "h").kind(),
+        "HEADER"
+    );
+    assert_eq!(
+        TemplateDefinitionComponent::body_security_recommendation().kind(),
+        "BODY"
+    );
+    assert_eq!(
+        TemplateDefinitionComponent::footer_code_expiration(5).kind(),
+        "FOOTER"
+    );
+    assert_eq!(
+        TemplateDefinitionComponent::buttons(vec![TemplateButton::quick_reply("a")]).kind(),
+        "BUTTONS"
+    );
+    assert!(TemplateDefinitionComponent::footer_text("f")
+        .with_example("unused")
+        .validate()
+        .is_ok());
+
+    // Acks start empty and treat a missing flag as accepted.
+    assert_eq!(TemplateAck::default().id, None);
+    assert!(TemplateAck::default().is_success());
+    assert!(TemplateDeleteAck::default().extra.is_empty());
+    assert!(TemplateDeleteAck::default().is_success());
+
+    // The definition exposes what it was built with.
+    let definition = TemplateDefinition::new("t", "de", TemplateCategory::Utility).body_text("x");
+    assert_eq!(definition.name, "t");
+    assert_eq!(definition.language.code, "de");
+    assert_eq!(definition.components.len(), 1);
+}
+
+#[test]
 fn transport_response_accessors() {
     use meta_whatsapp::transport::{Method, Request, Response};
 
