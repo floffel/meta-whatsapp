@@ -204,6 +204,15 @@ with a token the API just rejected.
 * `ReqwestTransport` classifies `reqwest` failures by phase: `is_connect()` is
   "before the write" (retryable), a timeout or body/decode error is "after the
   write" (ambiguous for a send), and anything else is terminal.
+* A response body is capped at `DEFAULT_MAX_RESPONSE_BYTES` (100 MiB, exactly
+  `MAX_DOCUMENT_BYTES`, so `download_media` still works for the largest accepted
+  upload) and read chunk by chunk. A `Content-Length` that already announces
+  more is rejected before the body is touched, and a chunked or close-delimited
+  body is measured as it streams, so neither a missing nor a misleading length
+  can make the process allocate past the cap. Over-cap is
+  `Error::ResponseTooLarge { limit, status }`, never a panic, and the message
+  names the limit and the status only — never the body. `ReqwestTransport::with_max_response_bytes` lowers the
+  ceiling per client.
 * TLS trust store: the `http` feature builds `reqwest` with
   `default-features = false, features = ["json", "rustls"]`. `reqwest` 0.13
   validates against the platform trust store (`rustls-platform-verifier`) and

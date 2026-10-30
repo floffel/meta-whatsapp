@@ -9,7 +9,30 @@ of the README.
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+- `ReqwestTransport::max_response_bytes`, `ReqwestTransport::with_max_response_bytes`
+  and `DEFAULT_MAX_RESPONSE_BYTES`, plus the typed `Error::ResponseTooLarge`.
+  The default ceiling is 100 MiB — exactly `media::MAX_DOCUMENT_BYTES`, so
+  `download_media` still works for the largest document the crate accepts — and
+  a unit test pins it to `MAX_DOCUMENT_BYTES` so the two cannot drift.
+
+### Fixed
+- `ReqwestTransport` no longer buffers a response body of unbounded size. The
+  declared `Content-Length` is rejected before any of the body is read when it
+  already exceeds the ceiling, and each streamed chunk is added to a running
+  total that is checked against it, so a chunked or close-delimited body cannot
+  slip past the cap either. The buffer's capacity is clamped to the ceiling as
+  well, so an over-cap response fails fast instead of allocating — a lying or
+  missing length cannot make the process grow the vector past the limit.
+- An oversized body is the typed `Error::ResponseTooLarge { limit, status }`,
+  never a panic, and its message names the limit and the status only: a body is
+  attacker controlled and is never echoed. It is terminal for the retry layer (a repeat would
+  return the same document) and ambiguous for a non-idempotent call (the server
+  did answer), so `Attempt::classify` surfaces it unchanged instead of spending
+  the budget on retries that cannot succeed.
+- `tests/reqwest_transport.rs` pins both sides of the ceiling for
+  declared-length, close-delimited, chunked and zero-byte bodies, and
+  `download_media` at the default. Closes #11.
 
 ## [0.1.5] - 2026-10-27
 

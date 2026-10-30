@@ -145,6 +145,40 @@ pub enum Error {
         phase: TransportPhase,
     },
 
+    /// The response body was larger than the ceiling the transport is
+    /// configured with, so it was abandoned instead of buffered.
+    ///
+    /// The transport checks the declared `Content-Length` before reading
+    /// anything and keeps a running total while it streams, so the body is
+    /// never held in memory. The message names the limit and the status only;
+    /// the body itself is attacker controlled and is never quoted.
+    ///
+    /// Repeating the request would return the same oversized document, so
+    /// [`Error::is_retryable`] is `false`. The server did answer, so on a
+    /// non-idempotent call the outcome is still unknown: [`Error::is_ambiguous`]
+    /// is `true`.
+    ///
+    /// ```rust
+    /// use meta_whatsapp::{error::TransportPhase, Error};
+    ///
+    /// let err = Error::ResponseTooLarge { limit: 1024, status: 200 };
+    /// assert_eq!(
+    ///     err.to_string(),
+    ///     "response body exceeds the configured 1024-byte limit (http 200)"
+    /// );
+    /// assert_eq!(err.status(), Some(200));
+    /// assert!(!err.is_retryable(), "a repeat returns the same body");
+    /// assert!(err.is_ambiguous(), "the server answered, so a send may have landed");
+    /// assert_eq!(err.transport_phase(), Some(TransportPhase::AfterWrite));
+    /// ```
+    #[error("response body exceeds the configured {limit}-byte limit (http {status})")]
+    ResponseTooLarge {
+        /// The ceiling the transport was configured with, in bytes.
+        limit: usize,
+        /// HTTP status the oversized response carried.
+        status: u16,
+    },
+
     /// The Graph API answered with an error envelope, or with a non-2xx body
     /// that is not JSON.
     #[error("graph api error {code} (http {status}): {message}")]
@@ -315,15 +349,19 @@ impl Error {
         match self {
             Self::Transport { phase, .. } => phase.is_before_write(),
             Self::Api { retryable, .. } => *retryable,
+            // `ResponseTooLarge` is deliberately not retried: the same request
+            // would return the same oversized document.
             _ => false,
         }
     }
 
     /// Whether the request may have taken effect even though it failed.
     ///
-    /// `true` for [`Error::Ambiguous`] and for transport failures *after* the
-    /// request was written. A caller that retries such a request risks a
-    /// duplicate delivery; a caller that does not risks a lost one.
+    /// `true` for [`Error::Ambiguous`], for transport failures *after* the
+    /// request was written, and for [`Error::ResponseTooLarge`] (the server
+    /// answered, only its body was dropped). A caller that retries such a
+    /// request risks a duplicate delivery; a caller that does not risks a lost
+    /// one.
     ///
     /// ```rust
     /// use meta_whatsapp::{error::TransportPhase, Error};
@@ -335,7 +373,7 @@ impl Error {
     #[must_use]
     pub fn is_ambiguous(&self) -> bool {
         match self {
-            Self::Ambiguous { .. } => true,
+            Self::Ambiguous { .. } | Self::ResponseTooLarge { .. } => true,
             Self::Transport { phase, .. } => phase.is_after_write(),
             _ => false,
         }
@@ -343,17 +381,25 @@ impl Error {
 
     /// The transport phase, when this is a transport failure.
     ///
+    /// [`Error::ResponseTooLarge`] counts as a transport failure after the
+    /// write: the server answered, the body was dropped.
+    ///
     /// ```rust
     /// use meta_whatsapp::{error::TransportPhase, Error};
     ///
     /// let err = Error::transport_terminal("bad scheme");
     /// assert_eq!(err.transport_phase(), Some(TransportPhase::Terminal));
     /// assert_eq!(Error::transport("dns").transport_phase(), Some(TransportPhase::BeforeWrite));
+    /// assert_eq!(
+    ///     Error::ResponseTooLarge { limit: 1, status: 200 }.transport_phase(),
+    ///     Some(TransportPhase::AfterWrite)
+    /// );
     /// ```
     #[must_use]
     pub fn transport_phase(&self) -> Option<TransportPhase> {
         match self {
             Self::Transport { phase, .. } => Some(*phase),
+            Self::ResponseTooLarge { .. } => Some(TransportPhase::AfterWrite),
             _ => None,
         }
     }
@@ -376,7 +422,7 @@ impl Error {
     #[must_use]
     pub fn status(&self) -> Option<u16> {
         match self {
-            Self::Api { status, .. } => Some(*status),
+            Self::Api { status, .. } | Self::ResponseTooLarge { status, .. } => Some(*status),
             Self::Ambiguous { status, .. } => *status,
             _ => None,
         }
@@ -456,10 +502,26 @@ mod tests {
             Error::transport("x"),
             Error::transport_after_write("x"),
             Error::transport_terminal("x"),
+            Error::ResponseTooLarge {
+                limit: 0,
+                status: 500,
+            },
             Error::ambiguous("op", None, Error::transport("x")),
         ];
         for error in errors {
             assert_ne!(error.to_string(), "");
         }
+    }
+
+    #[test]
+    fn an_oversized_body_is_ambiguous_but_never_retried() {
+        let error = Error::ResponseTooLarge {
+            limit: 4,
+            status: 200,
+        };
+        assert!(error.is_ambiguous(), "the server answered");
+        assert!(!error.is_retryable(), "the same body would come back");
+        assert_eq!(error.status(), Some(200));
+        assert_eq!(error.retry_after(), None);
     }
 }

@@ -189,6 +189,10 @@ impl Attempt {
                     Self::Terminal
                 }
             }
+            // Everything else — a 4xx, a validation failure, an invalid
+            // signature, and `Error::ResponseTooLarge` (a repeat would return
+            // the same oversized body) — is terminal. The typed error is more
+            // useful to the caller than a retry loop that always fails.
             _ => Self::Terminal,
         }
     }
@@ -500,6 +504,19 @@ mod tests {
         let policy = RetryPolicy::new(100);
         assert_eq!(
             policy.decide(Attempt::Terminal, Repeatability::Idempotent, 1),
+            Action::Surface
+        );
+    }
+
+    #[test]
+    fn an_oversized_response_is_terminal_even_for_a_read() {
+        let error = Error::ResponseTooLarge {
+            limit: 1024,
+            status: 200,
+        };
+        assert_eq!(Attempt::classify(&error), Attempt::Terminal);
+        assert_eq!(
+            RetryPolicy::new(3).decide(Attempt::classify(&error), Repeatability::Idempotent, 1),
             Action::Surface
         );
     }
