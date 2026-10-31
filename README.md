@@ -4,7 +4,7 @@ Typed client and webhook toolkit for the [WhatsApp Cloud API](https://developers
 
 Three independent parts, all usable on their own:
 
-* **Webhook** — constant-time `X-Hub-Signature-256` verification, GET handshake, replay window, and the payload parsed into types (message events, statuses, unknown future events).
+* **Webhook** — constant-time `X-Hub-Signature-256` verification, GET handshake, replay window, and the payload parsed into types (message events, statuses with the `phone_number_id` they arrived on, unknown future events).
 * **Client** — every message family, media upload/download/delete, template listing, and account administration (business profile, phone-number quality and limits, blocklist, webhook subscriptions).
 * **Account types** — `business`, `subscription` and `usage` modules behind that surface, including Meta's `X-Business-Use-Case-Usage` budget header.
 
@@ -20,6 +20,12 @@ let payload = verifier.verify_fresh(body_bytes, &signature_header, now_unix)?;
 
 for (phone_number_id, message) in payload.inbound_messages() {
     println!("{phone_number_id}: {} says {:?}", message.from, message.text_body());
+}
+
+// Delivery statuses carry the number they belong to, so a multi-tenant
+// service can route `sent`/`delivered`/`read`/`failed` to the right tenant.
+for (phone_number_id, status) in payload.statuses_with_phone_number_id() {
+    println!("{phone_number_id}: {} is {}", status.id, status.status);
 }
 ```
 

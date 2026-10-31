@@ -937,6 +937,22 @@ pub struct StatusError {
 }
 
 impl WebhookPayload {
+    /// The changes that carry a `value.metadata`, paired with that change's
+    /// `phone_number_id` (empty when the metadata block omits it).
+    ///
+    /// Both routing iterators read the id from the same place, so the filter
+    /// lives here once: a change without `metadata` has no id to attribute an
+    /// event to, and inventing one would misroute it to another tenant.
+    fn attributable_changes(&self) -> impl Iterator<Item = (&str, &ChangeValue)> {
+        self.entry
+            .iter()
+            .flat_map(|entry| entry.changes.iter())
+            .filter_map(|change| {
+                let phone_number_id = change.value.metadata.as_ref()?.phone_number_id.as_str();
+                Some((phone_number_id, &change.value))
+            })
+    }
+
     /// Iterates all inbound messages together with the `phone_number_id` they
     /// arrived on — the value a multi-tenant service routes by.
     ///
@@ -948,17 +964,20 @@ impl WebhookPayload {
     /// assert_eq!(payload.inbound_messages().count(), 0);
     /// ```
     pub fn inbound_messages(&self) -> impl Iterator<Item = (&str, &Message)> {
-        self.entry
-            .iter()
-            .flat_map(|e| e.changes.iter())
-            .filter_map(|c| {
-                let phone_number_id = c.value.metadata.as_ref()?.phone_number_id.as_str();
-                Some(c.value.messages.iter().map(move |m| (phone_number_id, m)))
+        self.attributable_changes()
+            .flat_map(|(phone_number_id, value)| {
+                value
+                    .messages
+                    .iter()
+                    .map(move |message| (phone_number_id, message))
             })
-            .flatten()
     }
 
     /// Iterates all delivery statuses.
+    ///
+    /// The `phone_number_id` is dropped here; use
+    /// [`WebhookPayload::statuses_with_phone_number_id`] when the status has to
+    /// be routed to the number it belongs to.
     ///
     /// ```
     /// use meta_whatsapp::WebhookPayload;
@@ -972,6 +991,52 @@ impl WebhookPayload {
             .iter()
             .flat_map(|e| e.changes.iter())
             .flat_map(|c| c.value.statuses.iter())
+    }
+
+    /// Iterates all delivery statuses together with the `phone_number_id` they
+    /// arrived on — the sibling [`WebhookPayload::statuses`] lacks.
+    ///
+    /// A `sent`/`delivered`/`read`/`failed` event carries no number of its own;
+    /// the id lives in the same `value.metadata` that
+    /// [`WebhookPayload::inbound_messages`] already reads, so multi-tenant
+    /// routing of statuses is possible without walking `entry[].changes[]` by
+    /// hand.
+    ///
+    /// Filtering is identical to [`WebhookPayload::inbound_messages`]: a change
+    /// whose `value.metadata` is absent is skipped (no id, nothing to route by),
+    /// and `metadata` that is present but has no `phone_number_id` yields `""`
+    /// rather than being dropped, so both iterators agree on the same change.
+    /// [`WebhookPayload::statuses`] still sees everything, attributable or not.
+    ///
+    /// ```
+    /// use meta_whatsapp::WebhookPayload;
+    ///
+    /// let payload: WebhookPayload = serde_json::from_str(
+    ///     r#"{"object":"whatsapp_business_account","entry":[
+    ///         {"id":"1","changes":[{"field":"messages","value":{
+    ///             "metadata":{"display_phone_number":"15550000001","phone_number_id":"111"},
+    ///             "statuses":[{"id":"wamid.1","status":"delivered","timestamp":"10"}]}}]},
+    ///         {"id":"2","changes":[{"field":"messages","value":{
+    ///             "statuses":[{"id":"wamid.2","status":"read","timestamp":"11"}]}}]}]}"#,
+    /// ).unwrap();
+    ///
+    /// let routed: Vec<_> = payload
+    ///     .statuses_with_phone_number_id()
+    ///     .map(|(phone_number_id, status)| (phone_number_id, status.id.as_str()))
+    ///     .collect();
+    /// // The change without metadata is skipped: no id to route by.
+    /// assert_eq!(routed, vec![("111", "wamid.1")]);
+    /// // The unpaired view is unchanged and still sees both.
+    /// assert_eq!(payload.statuses().count(), 2);
+    /// ```
+    pub fn statuses_with_phone_number_id(&self) -> impl Iterator<Item = (&str, &Status)> {
+        self.attributable_changes()
+            .flat_map(|(phone_number_id, value)| {
+                value
+                    .statuses
+                    .iter()
+                    .map(move |status| (phone_number_id, status))
+            })
     }
 
     /// Iterates every change, including non-message events.
