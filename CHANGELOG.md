@@ -10,6 +10,19 @@ of the README.
 ## [Unreleased]
 
 ### Added
+- Multi-tenant routing of delivery statuses (#42):
+  `WebhookPayload::statuses_with_phone_number_id()` yields
+  `(&str, &Status)` — the sibling of `inbound_messages()` that the plain
+  `statuses()` iterator could not provide, because it dropped the
+  `value.metadata.phone_number_id` a service routes `sent`/`delivered`/`read`/
+  `failed` events by. Filtering is identical to `inbound_messages()`: a change
+  without `metadata` is skipped as unattributable, while `statuses()` keeps
+  returning every status, so nothing breaks for existing callers. The shared
+  filter lives in one private helper, so the two routing iterators cannot drift
+  apart. Tests: a two-entry payload with two numbers, the skipped-metadata case,
+  the empty edges (no entries, empty `statuses` array, `metadata` without a
+  `phone_number_id`), a proptest pinning the pairing to the documented rule, and
+  the example now prints the routing id.
 - Typed inbound flow replies. `InteractiveReply::nfm_reply` was an untyped
   `serde_json::Value`; it is now a `FlowReply` (`name`, `body`, `response_json`,
   plus `extra` for members Meta adds later) reachable through

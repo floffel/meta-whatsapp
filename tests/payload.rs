@@ -68,6 +68,13 @@ fn parses_a_realistic_payload() {
         "CBP"
     );
 
+    // The routing view pairs the same status with the number it arrived on.
+    let routed: Vec<_> = payload
+        .statuses_with_phone_number_id()
+        .map(|(phone_number_id, status)| (phone_number_id, status.id.as_str()))
+        .collect();
+    assert_eq!(routed, vec![("106540352242922", "wamid.def456")]);
+
     let contact = &payload.entry[0].changes[0].value.contacts[0];
     assert_eq!(contact.wa_id, "4915112345678");
     assert_eq!(contact.profile.name.as_deref(), Some("Florian"));
@@ -282,10 +289,111 @@ fn messages_without_metadata_are_skipped() {
 }
 
 #[test]
+fn statuses_carry_the_phone_number_id_they_arrived_on() {
+    // Two entries, two numbers: an id attributed to the wrong entry would route
+    // the status to the wrong tenant, so the pairing is asserted per item.
+    let json = r#"{"object":"whatsapp_business_account","entry":[
+        {"id":"waba-1","changes":[{"field":"messages","value":{
+            "metadata":{"display_phone_number":"15550000001","phone_number_id":"111"},
+            "statuses":[
+                {"id":"wamid.a","status":"sent","timestamp":"10","recipient_id":"4915"},
+                {"id":"wamid.b","status":"read","timestamp":"11","recipient_id":"4915"}
+            ]}}]},
+        {"id":"waba-2","changes":[{"field":"messages","value":{
+            "metadata":{"display_phone_number":"15550000002","phone_number_id":"222"},
+            "statuses":[{"id":"wamid.c","status":"failed","timestamp":"12","recipient_id":"4916"}]}}]}
+    ]}"#;
+    let payload = parse(json);
+
+    let routed: Vec<_> = payload
+        .statuses_with_phone_number_id()
+        .map(|(phone_number_id, status)| {
+            (phone_number_id, status.id.as_str(), status.status.as_str())
+        })
+        .collect();
+    assert_eq!(
+        routed,
+        vec![
+            ("111", "wamid.a", "sent"),
+            ("111", "wamid.b", "read"),
+            ("222", "wamid.c", "failed"),
+        ]
+    );
+
+    // The plain iterator is unchanged: every status, metadata or not, in order.
+    assert_eq!(payload.statuses().count(), 3);
+}
+
+#[test]
+fn statuses_without_metadata_are_skipped_by_the_paired_iterator() {
+    let json = r#"{"object":"whatsapp_business_account","entry":[{"id":"1","changes":[
+        {"field":"messages","value":{
+            "statuses":[{"id":"wamid.lost","status":"delivered","timestamp":"10"}]}},
+        {"field":"messages","value":{
+            "metadata":{"display_phone_number":"1","phone_number_id":"2"},
+            "statuses":[{"id":"wamid.kept","status":"read","timestamp":"11"}]}}
+    ]}]}"#;
+    let payload = parse(json);
+
+    let routed: Vec<_> = payload
+        .statuses_with_phone_number_id()
+        .map(|(phone_number_id, status)| (phone_number_id, status.id.as_str()))
+        .collect();
+    assert_eq!(routed, vec![("2", "wamid.kept")]);
+
+    // Same filter as `inbound_messages`: unattributable, so absent from both.
+    assert!(payload.inbound_messages().next().is_none());
+    // Nothing is hidden from callers that do not route.
+    assert_eq!(payload.statuses().count(), 2);
+}
+
+#[test]
+fn the_paired_status_iterator_covers_its_empty_edges() {
+    // No entries at all.
+    let empty = parse(r#"{"object":"whatsapp_business_account","entry":[]}"#);
+    assert!(empty.statuses_with_phone_number_id().next().is_none());
+
+    // Metadata but an empty `statuses` array: a message-only change yields
+    // nothing from the status iterator and everything from the message one.
+    let messages_only = parse(
+        r#"{"object":"whatsapp_business_account","entry":[{"id":"1","changes":[{"field":"messages","value":{
+            "metadata":{"display_phone_number":"1","phone_number_id":"2"},
+            "messages":[{"id":"m","from":"3","type":"text","text":{"body":"hi"}}],
+            "statuses":[]}}]}]}"#,
+    );
+    assert!(messages_only
+        .statuses_with_phone_number_id()
+        .next()
+        .is_none());
+    assert_eq!(messages_only.inbound_messages().count(), 1);
+
+    // Metadata present without a `phone_number_id` key is still metadata: the
+    // pair is `("", status)`, exactly as `inbound_messages` treats that change.
+    // Neither iterator invents an id, and neither drops the event.
+    let blank = parse(
+        r#"{"object":"whatsapp_business_account","entry":[{"id":"1","changes":[{"field":"messages","value":{
+            "metadata":{"display_phone_number":"1"},
+            "messages":[{"id":"m","from":"3","type":"text"}],
+            "statuses":[{"id":"s","status":"sent","timestamp":"10"}]}}]}]}"#,
+    );
+    let routed: Vec<_> = blank
+        .statuses_with_phone_number_id()
+        .map(|(phone_number_id, status)| (phone_number_id, status.id.as_str()))
+        .collect();
+    assert_eq!(routed, vec![("", "s")]);
+    let messages: Vec<_> = blank
+        .inbound_messages()
+        .map(|(phone_number_id, message)| (phone_number_id, message.id.as_str()))
+        .collect();
+    assert_eq!(messages, vec![("", "m")]);
+}
+
+#[test]
 fn empty_entry_list_is_valid() {
     let payload = parse(r#"{"object":"whatsapp_business_account","entry":[]}"#);
     assert_eq!(payload.inbound_messages().count(), 0);
     assert_eq!(payload.statuses().count(), 0);
+    assert_eq!(payload.statuses_with_phone_number_id().count(), 0);
     assert_eq!(payload.changes().count(), 0);
     assert_eq!(payload.timestamps().count(), 0);
     assert_eq!(payload.newest_timestamp(), None);

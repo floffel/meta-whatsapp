@@ -79,9 +79,9 @@ fn main() -> meta_whatsapp::Result<()> {
         );
     }
 
-    for status in payload.statuses() {
+    for (phone_number_id, status) in payload.statuses_with_phone_number_id() {
         println!(
-            "{} -> {} by {} (correlation: {})",
+            "{phone_number_id} <- {} is {} for {} (correlation: {})",
             status.id,
             status.status,
             status.recipient_id,

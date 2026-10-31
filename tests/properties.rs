@@ -436,6 +436,59 @@ proptest! {
         prop_assert_eq!(accepted, expected);
     }
 
+    /// The routing iterator is exactly the view it promises: every status of a
+    /// change that carries `metadata`, paired with that change's
+    /// `phone_number_id` and in order — while `statuses()` still sees all of
+    /// them, attributable or not.
+    #[test]
+    fn status_routing_pairs_every_attributable_status(
+        changes in prop::collection::vec(
+            (
+                prop::option::of("[0-9]{1,20}"),
+                prop::collection::vec("[a-z]{1,10}", 0..3),
+            ),
+            0..6,
+        ),
+    ) {
+        let mut entries = Vec::new();
+        let mut expected: Vec<(String, String)> = Vec::new();
+        let mut total = 0_usize;
+        for (index, (phone_number_id, ids)) in changes.iter().enumerate() {
+            let statuses: Vec<Value> = ids
+                .iter()
+                .map(|id| serde_json::json!({"id": id, "status": "delivered", "timestamp": "10"}))
+                .collect();
+            total += ids.len();
+            let mut value = serde_json::json!({ "statuses": statuses });
+            if let Some(phone_number_id) = phone_number_id {
+                value["metadata"] = serde_json::json!({
+                    "display_phone_number": "1",
+                    "phone_number_id": phone_number_id,
+                });
+                for id in ids {
+                    expected.push((phone_number_id.clone(), id.clone()));
+                }
+            }
+            entries.push(serde_json::json!({
+                "id": format!("waba-{index}"),
+                "changes": [{ "field": "messages", "value": value }],
+            }));
+        }
+        let body = serde_json::json!({
+            "object": "whatsapp_business_account",
+            "entry": entries,
+        });
+        let payload: WebhookPayload = serde_json::from_value(body).unwrap();
+
+        let routed: Vec<(String, String)> = payload
+            .statuses_with_phone_number_id()
+            .map(|(phone_number_id, status)| (phone_number_id.to_string(), status.id.clone()))
+            .collect();
+        prop_assert_eq!(&routed, &expected);
+        prop_assert_eq!(payload.statuses().count(), total);
+        prop_assert!(routed.len() <= total);
+    }
+
     /// Quality ratings round-trip through their wire spelling, and an unknown
     /// spelling is preserved rather than dropped.
     #[test]
