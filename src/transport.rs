@@ -494,7 +494,11 @@ pub trait Transport {
 
 /// `reqwest`-based transport, enabled by default via the `http` feature.
 ///
-/// The client is cheap to clone and safe to share across tasks.
+/// The client is cheap to clone and safe to share across tasks. Response bodies
+/// are buffered only up to [`DEFAULT_MAX_RESPONSE_BYTES`], and the ceiling is
+/// enforced while the body streams, so a misbehaving endpoint cannot make the
+/// process allocate without bound; use
+/// [`ReqwestTransport::with_max_response_bytes`] to tighten it per client.
 ///
 /// ```no_run
 /// # #[cfg(feature = "http")]
@@ -507,22 +511,107 @@ pub trait Transport {
 /// # }
 /// ```
 #[cfg(feature = "http")]
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct ReqwestTransport {
     client: reqwest::Client,
+    max_response_bytes: usize,
+}
+
+/// Default ceiling for a buffered response body: 100 MiB.
+///
+/// That is exactly [`crate::media::MAX_DOCUMENT_BYTES`], the largest document
+/// the Cloud API accepts, so `download_media` still works for every media file
+/// the crate lets you upload while a response larger than any possible upload
+/// cannot be legitimate. Every other Graph response is a few kilobytes. Lower
+/// the ceiling with [`ReqwestTransport::with_max_response_bytes`] when a
+/// client only ever calls small endpoints.
+///
+/// ```rust
+/// # #[cfg(feature = "http")]
+/// # {
+/// use meta_whatsapp::transport::DEFAULT_MAX_RESPONSE_BYTES;
+///
+/// assert_eq!(DEFAULT_MAX_RESPONSE_BYTES, 100 * 1024 * 1024);
+/// # }
+/// ```
+#[cfg(feature = "http")]
+pub const DEFAULT_MAX_RESPONSE_BYTES: usize = 100 * 1024 * 1024;
+
+#[cfg(feature = "http")]
+impl Default for ReqwestTransport {
+    fn default() -> Self {
+        Self {
+            client: reqwest::Client::default(),
+            max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES,
+        }
+    }
 }
 
 #[cfg(feature = "http")]
 impl ReqwestTransport {
-    /// Creates a transport with a default client (rustls, redirects followed).
+    /// Creates a transport with a default client (rustls, redirects followed)
+    /// and the default [`DEFAULT_MAX_RESPONSE_BYTES`] ceiling.
     ///
-    /// ```
+    /// ```rust
     /// # #[cfg(feature = "http")]
+    /// # {
     /// let transport = meta_whatsapp::ReqwestTransport::new();
+    /// assert_eq!(
+    ///     transport.max_response_bytes(),
+    ///     meta_whatsapp::transport::DEFAULT_MAX_RESPONSE_BYTES
+    /// );
+    /// # }
     /// ```
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Sets the largest response body the transport will buffer, in bytes.
+    ///
+    /// The declared `Content-Length` is checked first, so an announced
+    /// oversized body fails before anything is read; a response without a
+    /// usable length is measured as it streams and abandoned as soon as the
+    /// next chunk would cross the ceiling. Either way the oversized body is
+    /// never held in memory and the call fails with
+    /// [`Error::ResponseTooLarge`].
+    ///
+    /// A limit of `0` accepts only an empty body. Raise it above
+    /// [`DEFAULT_MAX_RESPONSE_BYTES`] only for an endpoint documented to return
+    /// more than the largest media document — the cap is what keeps a
+    /// compromised or misrouted endpoint from exhausting the process.
+    ///
+    /// ```rust
+    /// # #[cfg(feature = "http")]
+    /// # {
+    /// use meta_whatsapp::ReqwestTransport;
+    ///
+    /// let transport = ReqwestTransport::new().with_max_response_bytes(4096);
+    /// assert_eq!(transport.max_response_bytes(), 4096);
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn with_max_response_bytes(mut self, limit: usize) -> Self {
+        self.max_response_bytes = limit;
+        self
+    }
+
+    /// The configured ceiling for a buffered response body, in bytes.
+    ///
+    /// ```rust
+    /// # #[cfg(feature = "http")]
+    /// # {
+    /// use meta_whatsapp::ReqwestTransport;
+    ///
+    /// assert_eq!(
+    ///     ReqwestTransport::new().max_response_bytes(),
+    ///     meta_whatsapp::transport::DEFAULT_MAX_RESPONSE_BYTES
+    /// );
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn max_response_bytes(&self) -> usize {
+        self.max_response_bytes
     }
 }
 
@@ -549,7 +638,7 @@ impl Transport for ReqwestTransport {
             }
         };
 
-        let response = builder
+        let mut response = builder
             .send()
             .await
             .map_err(|error| describe_reqwest_error(&error))?;
@@ -564,14 +653,75 @@ impl Transport for ReqwestTransport {
                 )
             })
             .collect::<Vec<_>>();
-        let body = response
-            .bytes()
-            .await
-            .map_err(|error| describe_reqwest_error(&error))?
-            .to_vec();
+        let body = read_body(&mut response, self.max_response_bytes, status).await?;
 
         Ok(Response::new(status, headers, body))
     }
+}
+
+/// Reads a response body without ever buffering more than `limit` bytes.
+///
+/// The declared `Content-Length` is checked first, so an announced oversized
+/// body is rejected before a single byte of it is read. It is only a hint — a
+/// response may be chunked, close-delimited, or otherwise unmeasured — so the
+/// running total is enforced on every chunk as well. The vector never reserves
+/// more than the ceiling, so even the allocation stays bounded.
+#[cfg(feature = "http")]
+async fn read_body(response: &mut reqwest::Response, limit: usize, status: u16) -> Result<Vec<u8>> {
+    /// Never trust a declared length to size the allocation.
+    const MAX_PREALLOC_BYTES: usize = 64 * 1024;
+
+    let declared = response.content_length();
+    if declared.is_some_and(|length| length_exceeds(length, limit)) {
+        return Err(Error::ResponseTooLarge { limit, status });
+    }
+    let capacity = declared
+        .and_then(|length| usize::try_from(length).ok())
+        .map_or(0, |length| length.min(limit).min(MAX_PREALLOC_BYTES));
+    let mut body = Vec::with_capacity(capacity);
+
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|error| describe_reqwest_error(&error))?
+    {
+        append_chunk(&mut body, &chunk, limit, status)?;
+    }
+    Ok(body)
+}
+
+/// Appends one response chunk while keeping both the length and the capacity of
+/// `body` at or below `limit`.
+///
+/// This is the check a lying or missing `Content-Length` cannot bypass: the
+/// total is accumulated from the bytes actually received. Capacity doubles so a
+/// large chunked body does not reallocate on every frame, but the growth is
+/// clamped to the ceiling. A chunk that would cross the ceiling is rejected and
+/// `body` is left untouched.
+#[cfg(feature = "http")]
+fn append_chunk(body: &mut Vec<u8>, chunk: &[u8], limit: usize, status: u16) -> Result<()> {
+    let total = body
+        .len()
+        .checked_add(chunk.len())
+        .filter(|total| *total <= limit)
+        .ok_or(Error::ResponseTooLarge { limit, status })?;
+
+    if total > body.capacity() {
+        let target = body.capacity().saturating_mul(2).max(total).min(limit);
+        body.reserve_exact(target - body.len());
+    }
+    body.extend_from_slice(chunk);
+    Ok(())
+}
+
+/// Whether a length from the wire cannot fit within `limit` bytes.
+///
+/// `usize` is at most 64 bits on every supported target, so the widening cast
+/// is exact; lengths are compared as `u64` rather than narrowed, because a
+/// truncated length must never look small.
+#[cfg(feature = "http")]
+fn length_exceeds(length: u64, limit: usize) -> bool {
+    length > limit as u64
 }
 
 /// What kind of connection failure a `reqwest` error reports, independent of
@@ -631,5 +781,67 @@ mod tests {
         assert_eq!(phase_of(FailureKind::Connect), TransportPhase::BeforeWrite);
         assert_eq!(phase_of(FailureKind::Response), TransportPhase::AfterWrite);
         assert_eq!(phase_of(FailureKind::Other), TransportPhase::Terminal);
+    }
+
+    #[test]
+    fn declared_lengths_stop_at_the_ceiling() {
+        assert!(!length_exceeds(0, 0));
+        assert!(length_exceeds(1, 0), "no byte fits a zero ceiling");
+        assert!(!length_exceeds(4, 4), "exactly at the ceiling is accepted");
+        assert!(length_exceeds(5, 4));
+        let ceiling = DEFAULT_MAX_RESPONSE_BYTES as u64;
+        assert!(!length_exceeds(ceiling, DEFAULT_MAX_RESPONSE_BYTES));
+        assert!(length_exceeds(ceiling + 1, DEFAULT_MAX_RESPONSE_BYTES));
+    }
+
+    #[test]
+    fn chunks_stop_at_the_ceiling_and_never_allocate_past_it() {
+        let mut body = Vec::new();
+        assert!(append_chunk(&mut body, b"ab", 4, 200).is_ok());
+        assert!(append_chunk(&mut body, b"cd", 4, 200).is_ok());
+        assert_eq!(body, b"abcd");
+        assert!(
+            body.capacity() <= 4,
+            "capacity must stay within the ceiling, got {}",
+            body.capacity()
+        );
+
+        let rejected = append_chunk(&mut body, b"e", 4, 200).unwrap_err();
+        assert!(matches!(
+            rejected,
+            Error::ResponseTooLarge {
+                limit: 4,
+                status: 200
+            }
+        ));
+        assert_eq!(body, b"abcd", "a rejected chunk must not be appended");
+
+        let mut empty = Vec::new();
+        assert!(append_chunk(&mut empty, b"", 0, 200).is_ok());
+        assert!(append_chunk(&mut empty, b"x", 0, 200).is_err());
+        assert!(empty.is_empty(), "nothing may be buffered past zero");
+    }
+
+    #[test]
+    fn the_default_ceiling_is_the_largest_supported_media_document() {
+        assert_eq!(
+            usize::try_from(crate::media::MAX_DOCUMENT_BYTES),
+            Ok(DEFAULT_MAX_RESPONSE_BYTES),
+            "download_media must still fit the largest accepted upload"
+        );
+    }
+
+    #[test]
+    fn the_default_transport_uses_the_documented_ceiling() {
+        assert_eq!(
+            ReqwestTransport::default().max_response_bytes(),
+            DEFAULT_MAX_RESPONSE_BYTES
+        );
+        assert_eq!(
+            ReqwestTransport::new()
+                .with_max_response_bytes(17)
+                .max_response_bytes(),
+            17
+        );
     }
 }
