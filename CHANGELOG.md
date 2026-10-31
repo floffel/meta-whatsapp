@@ -10,6 +10,34 @@ of the README.
 ## [Unreleased]
 
 ### Added
+- Multi-tenant routing of delivery statuses (#42):
+  `WebhookPayload::statuses_with_phone_number_id()` yields
+  `(&str, &Status)` — the sibling of `inbound_messages()` that the plain
+  `statuses()` iterator could not provide, because it dropped the
+  `value.metadata.phone_number_id` a service routes `sent`/`delivered`/`read`/
+  `failed` events by. Filtering is identical to `inbound_messages()`: a change
+  without `metadata` is skipped as unattributable, while `statuses()` keeps
+  returning every status, so nothing breaks for existing callers. The shared
+  filter lives in one private helper, so the two routing iterators cannot drift
+  apart. Tests: a two-entry payload with two numbers, the skipped-metadata case,
+  the empty edges (no entries, empty `statuses` array, `metadata` without a
+  `phone_number_id`), a proptest pinning the pairing to the documented rule, and
+  the example now prints the routing id.
+- Blocklist paging (#41). `blocked_users()` reported `has_next_page()` but gave
+  no way to reach the next page, so any account with more blocked numbers than
+  one page was truncated silently. `BlockedUsersPage::next_cursor()` exposes the
+  `paging.cursors.after` value (an empty cursor counts as absent),
+  `BlockUsersQuery` carries that cursor plus an optional `limit`, and
+  `WhatsAppClient::blocked_users_after` / `blocked_users_with` take it back
+  percent-encoded. `WhatsAppClient::all_blocked_users` and
+  `all_blocked_users_with` walk the cursor until a page carries none — stopping
+  also on the cursor that produced the page, which no working API repeats but
+  would otherwise loop forever — and return every `BlockedUser` rather than the
+  first page. A blank or control-character cursor and a `limit` of `0` are
+  `Error::Validation` before a URL is built. Covered by recording-transport
+  tests for the encoded query, the two-page walk, the repeated-cursor stop, a
+  `next` link without a cursor, the rejection matrix and the 0/1 page-size
+  boundary, plus a proptest pinning the cursor round trip.
 - Typed inbound flow replies. `InteractiveReply::nfm_reply` was an untyped
   `serde_json::Value`; it is now a `FlowReply` (`name`, `body`, `response_json`,
   plus `extra` for members Meta adds later) reachable through

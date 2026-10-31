@@ -10,7 +10,9 @@
 mod common;
 
 use common::{client, json_response, response, MockTransport, Reply};
-use meta_whatsapp::business::{BusinessProfileUpdate, MessagingLimitTier, QualityRating};
+use meta_whatsapp::business::{
+    BlockUsersQuery, BusinessProfileUpdate, MessagingLimitTier, QualityRating,
+};
 use meta_whatsapp::subscription::{SubscriptionConfig, SubscriptionState};
 use meta_whatsapp::{Error, WhatsAppClient};
 
@@ -250,6 +252,180 @@ async fn malformed_block_requests_never_reach_the_network() {
         assert!(matches!(err, Error::Validation { .. }), "{users:?}");
     }
     assert_eq!(transport.call_count(), 0);
+}
+
+#[tokio::test]
+async fn the_blocklist_cursor_is_percent_encoded_into_the_query() {
+    let transport = MockTransport::new();
+    transport.push_response(json_response(&serde_json::json!({ "data": [] })));
+
+    let page = client(transport.clone())
+        .blocked_users_after("QVFIU+a/b=c d")
+        .await
+        .unwrap();
+
+    assert_eq!(page.data, Vec::new(), "a data-less page has no entries");
+    let call = transport.only_call();
+    assert_eq!(call.method.as_str(), "GET");
+    assert_eq!(
+        call.url,
+        "https://graph.facebook.com/v21.0/106540352242922/block_users?after=QVFIU%2Ba%2Fb%3Dc%20d"
+    );
+    assert!(
+        !call.url.contains(' '),
+        "a raw space would cut the query short"
+    );
+}
+
+#[tokio::test]
+async fn a_blocklist_query_sends_the_page_size_before_the_cursor() {
+    let transport = MockTransport::new();
+    transport.push_response(json_response(&serde_json::json!({
+        "data": [{"wa_id": "16505551234"}],
+        "paging": {"next": "https://graph.facebook.com/next", "cursors": {"after": "NEXT"}}
+    })));
+
+    let query = BlockUsersQuery::new().limit(25).after("QVFIU");
+    let page = client(transport.clone())
+        .blocked_users_with(&query)
+        .await
+        .unwrap();
+
+    assert_eq!(page.next_cursor(), Some("NEXT"));
+    assert!(transport
+        .only_call()
+        .url
+        .ends_with("/block_users?limit=25&after=QVFIU"));
+}
+
+#[tokio::test]
+async fn all_blocked_users_follows_two_pages_and_stops_without_paging() {
+    let transport = MockTransport::new();
+    transport.push_response(json_response(&serde_json::json!({
+        "data": [{"wa_id": "1"}, {"wa_id": "2"}],
+        "paging": {
+            "next": "https://graph.facebook.com/next",
+            "cursors": {"before": "b0", "after": "c1"}
+        }
+    })));
+    transport.push_response(json_response(
+        &serde_json::json!({"data": [{"wa_id": "3"}]}),
+    ));
+
+    let users = client(transport.clone()).all_blocked_users().await.unwrap();
+
+    let calls = transport.calls();
+    assert_eq!(calls.len(), 2, "one request per page, no extra probe");
+    assert!(
+        calls[0].url.ends_with("/block_users"),
+        "the first page has no cursor: {}",
+        calls[0].url
+    );
+    assert_eq!(
+        calls[1].url,
+        "https://graph.facebook.com/v21.0/106540352242922/block_users?after=c1"
+    );
+    let ids: Vec<_> = users
+        .iter()
+        .filter_map(|user| user.wa_id.as_deref())
+        .collect();
+    assert_eq!(ids, ["1", "2", "3"]);
+}
+
+#[tokio::test]
+async fn a_walk_can_start_at_a_cursor_and_at_its_own_page_size() {
+    let transport = MockTransport::new();
+    transport.push_response(json_response(
+        &serde_json::json!({"data": [{"wa_id": "9"}]}),
+    ));
+
+    let users = client(transport.clone())
+        .all_blocked_users_with(&BlockUsersQuery::new().limit(10).after("resume"))
+        .await
+        .unwrap();
+
+    assert_eq!(users.len(), 1);
+    assert!(transport
+        .only_call()
+        .url
+        .ends_with("/block_users?limit=10&after=resume"));
+}
+
+#[tokio::test]
+async fn all_blocked_users_ends_on_a_repeated_cursor_instead_of_looping() {
+    let transport = MockTransport::new();
+    for _ in 0..2 {
+        transport.push_response(json_response(&serde_json::json!({
+            "data": [{"wa_id": "1"}],
+            "paging": {"next": "https://graph.facebook.com/next", "cursors": {"after": "c1"}}
+        })));
+    }
+
+    let users = client(transport.clone()).all_blocked_users().await.unwrap();
+
+    assert_eq!(users.len(), 2, "both pages are kept");
+    assert_eq!(
+        transport.call_count(),
+        2,
+        "a cursor that points at itself ends the walk"
+    );
+}
+
+#[tokio::test]
+async fn a_next_link_without_a_cursor_ends_the_walk() {
+    let transport = MockTransport::new();
+    transport.push_response(json_response(&serde_json::json!({
+        "data": [{"wa_id": "1"}],
+        "paging": {"next": "https://graph.facebook.com/next"}
+    })));
+
+    let users = client(transport.clone()).all_blocked_users().await.unwrap();
+
+    assert_eq!(users.len(), 1);
+    assert_eq!(transport.call_count(), 1, "no cursor, nowhere to go");
+}
+
+#[tokio::test]
+async fn unusable_blocklist_cursors_and_page_sizes_never_reach_the_network() {
+    let transport = MockTransport::new();
+    let client = client(transport.clone());
+
+    for cursor in ["", " ", "\t", "a\nb"] {
+        let err = client.blocked_users_after(cursor).await.unwrap_err();
+        assert!(
+            matches!(err, Error::Validation { .. }),
+            "{cursor:?}: {err:?}"
+        );
+        let err = client
+            .all_blocked_users_with(&BlockUsersQuery::new().after(cursor))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, Error::Validation { .. }),
+            "{cursor:?}: {err:?}"
+        );
+    }
+
+    let err = client
+        .blocked_users_with(&BlockUsersQuery::new().limit(0))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, Error::Validation { .. }), "{err:?}");
+
+    assert_eq!(transport.call_count(), 0);
+}
+
+#[tokio::test]
+async fn a_page_size_of_one_is_the_smallest_accepted_page() {
+    let transport = MockTransport::new();
+    transport.push_response(json_response(&serde_json::json!({ "data": [] })));
+
+    client(transport.clone())
+        .blocked_users_with(&BlockUsersQuery::new().limit(1))
+        .await
+        .unwrap();
+
+    assert!(transport.only_call().url.ends_with("/block_users?limit=1"));
 }
 
 #[tokio::test]

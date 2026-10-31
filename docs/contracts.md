@@ -41,6 +41,7 @@ Secondary sources — the developer reference pages the spec links to:
 | `deregister` | `DELETE /{phone-number-id}/deregister` | `/{Version}/{Phone-Number-ID}/deregister` |
 | `set_two_step_verification_pin` | `POST /{phone-number-id}` (body `{"pin":"…"}`) | `/{Version}/{Phone-Number-ID}` |
 | `blocked_users` | `GET /{phone-number-id}/block_users` | `/{Version}/{Phone-Number-ID}/block_users` |
+| `blocked_users_after`, `blocked_users_with`, `all_blocked_users`, `all_blocked_users_with` | same, plus `?limit=…&after=…` (both optional) | same |
 | `block_users` | `POST /{phone-number-id}/block_users` | same |
 | `unblock_users` | `DELETE /{phone-number-id}/block_users` | same |
 | `webhook_subscriptions` | `GET /{waba-id}/subscribed_apps` | `/{Version}/{WABA-ID}/subscribed_apps` |
@@ -56,6 +57,7 @@ Secondary sources — the developer reference pages the spec links to:
 | `PhoneNumberInfo` | `PhoneNumberInfo` | `quality_rating` ∈ {GREEN, YELLOW, RED, NA}; `name_status` ∈ {APPROVED, AVAILABLE_WITHOUT_REVIEW, DECLINED, EXPIRED, PENDING_REVIEW, NONE}; `code_verification_status` ∈ {VERIFIED, UNVERIFIED}. |
 | `MessagingLimitTier` | `WhatsAppAccountNumber.messaging_limit_tier` | TIER_50, TIER_250, TIER_1K, TIER_10K, TIER_100K, TIER_UNLIMITED. |
 | `BlockedUser` / `BlockedUsersPage` | `GetBlockedUsersData`, `BlockedUser` | `data[]` plus `paging`. |
+| `BlockUsersQuery` | paging is described in the block-users guide, not typed in the OpenAPI file | `limit` (≥ 1; no documented maximum) plus the opaque `after` cursor from `paging.cursors.after`, rendered as `limit=…&after=…`. |
 | `BlockOutcome` | `BlockUsersData` (`added_users`), `UnblockUsersData` (`removed_users`), `BlockedUserOperation` | Same payload shape for POST and DELETE; ids travel in the body. |
 | `SuccessOutcome` | register / deregister / two-step responses (`success`) | `success` is documented as a boolean; missing, `1`/`0` and `"true"`/`"1"` also decode — see *unverified*, README. Unknown fields land in `extra`. |
 | `VerificationPin` | two-step verification reference | exactly 6 ASCII digits, checked before allocation. `Debug`/`Display` are fixed redacted text; no getter, no `Default`, equality is constant time. |

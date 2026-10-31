@@ -5,8 +5,9 @@ use std::time::Duration;
 
 use meta_whatsapp::business::{
     block_users_payload, validate_block_user, validate_field_list, validate_verification_pin,
-    BusinessProfile, BusinessProfileUpdate, MessagingLimitTier, QualityRating, SuccessOutcome,
-    VerificationPin, BLOCK_USER_MAX_DIGITS, BLOCK_USER_MIN_DIGITS, VERIFICATION_PIN_LEN,
+    BlockUsersQuery, BusinessProfile, BusinessProfileUpdate, MessagingLimitTier, QualityRating,
+    SuccessOutcome, VerificationPin, BLOCK_USER_MAX_DIGITS, BLOCK_USER_MIN_DIGITS,
+    VERIFICATION_PIN_LEN,
 };
 use meta_whatsapp::media::{validate_media_id, MAX_MEDIA_ID_LEN};
 use meta_whatsapp::message::{CAPTION_MAX_BYTES, HEADER_MAX_CHARS};
@@ -454,6 +455,26 @@ proptest! {
         }
     }
 
+    /// Blocklist cursors survive the wire form, and the rendered query stays
+    /// inside a conservative URL alphabet.
+    #[test]
+    fn blocklist_queries_are_percent_encoded(cursor in ".{1,64}", limit in 1_u32..10_000) {
+        let rendered = BlockUsersQuery::new()
+            .limit(limit)
+            .after(&cursor)
+            .query_string();
+        prop_assert!(rendered.chars().all(|c| c.is_ascii_alphanumeric()
+            || matches!(c, '%' | '&' | '=' | '-' | '_' | '.' | '~')));
+        let limit_part = format!("limit={limit}");
+        prop_assert!(rendered.contains(&limit_part));
+        let encoded = rendered
+            .split('&')
+            .find_map(|part| part.strip_prefix("after="))
+            .unwrap();
+        let decoded = percent_decode_str(encoded).decode_utf8().unwrap();
+        prop_assert_eq!(decoded.as_ref(), cursor.as_str());
+    }
+
     /// Rendering is stable: JSON in, same JSON out (no field loss).
     #[test]
     fn rendered_messages_round_trip(body in ".{1,64}") {
@@ -483,6 +504,59 @@ proptest! {
         let accepted = verifier.check_replay(&payload, now).is_ok();
         let expected = tolerance == 0 || payload_ts.abs_diff(now) <= tolerance;
         prop_assert_eq!(accepted, expected);
+    }
+
+    /// The routing iterator is exactly the view it promises: every status of a
+    /// change that carries `metadata`, paired with that change's
+    /// `phone_number_id` and in order — while `statuses()` still sees all of
+    /// them, attributable or not.
+    #[test]
+    fn status_routing_pairs_every_attributable_status(
+        changes in prop::collection::vec(
+            (
+                prop::option::of("[0-9]{1,20}"),
+                prop::collection::vec("[a-z]{1,10}", 0..3),
+            ),
+            0..6,
+        ),
+    ) {
+        let mut entries = Vec::new();
+        let mut expected: Vec<(String, String)> = Vec::new();
+        let mut total = 0_usize;
+        for (index, (phone_number_id, ids)) in changes.iter().enumerate() {
+            let statuses: Vec<Value> = ids
+                .iter()
+                .map(|id| serde_json::json!({"id": id, "status": "delivered", "timestamp": "10"}))
+                .collect();
+            total += ids.len();
+            let mut value = serde_json::json!({ "statuses": statuses });
+            if let Some(phone_number_id) = phone_number_id {
+                value["metadata"] = serde_json::json!({
+                    "display_phone_number": "1",
+                    "phone_number_id": phone_number_id,
+                });
+                for id in ids {
+                    expected.push((phone_number_id.clone(), id.clone()));
+                }
+            }
+            entries.push(serde_json::json!({
+                "id": format!("waba-{index}"),
+                "changes": [{ "field": "messages", "value": value }],
+            }));
+        }
+        let body = serde_json::json!({
+            "object": "whatsapp_business_account",
+            "entry": entries,
+        });
+        let payload: WebhookPayload = serde_json::from_value(body).unwrap();
+
+        let routed: Vec<(String, String)> = payload
+            .statuses_with_phone_number_id()
+            .map(|(phone_number_id, status)| (phone_number_id.to_string(), status.id.clone()))
+            .collect();
+        prop_assert_eq!(&routed, &expected);
+        prop_assert_eq!(payload.statuses().count(), total);
+        prop_assert!(routed.len() <= total);
     }
 
     /// Quality ratings round-trip through their wire spelling, and an unknown

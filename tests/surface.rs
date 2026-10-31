@@ -285,6 +285,43 @@ fn template_queries_cover_every_filter() {
 }
 
 #[test]
+fn blocklist_paging_covers_the_query_and_the_cursor() {
+    use meta_whatsapp::{BlockUsersQuery, BlockedUsersPage};
+
+    // The empty query keeps the bare endpoint; a set one renders limit first.
+    let empty = BlockUsersQuery::new();
+    assert_eq!(empty.query_string(), "");
+    assert_eq!(empty, BlockUsersQuery::default());
+    assert!(empty.validate().is_ok());
+
+    let query = BlockUsersQuery::new().limit(1).after("QVFIU");
+    assert_eq!(query.query_string(), "limit=1&after=QVFIU");
+    assert!(query.validate().is_ok());
+
+    // Boundary pair for the page size: 0 is refused, 1 is the smallest page.
+    assert!(BlockUsersQuery::new().limit(0).validate().is_err());
+    assert!(BlockUsersQuery::new().limit(1).validate().is_ok());
+    // A cursor has to carry something.
+    assert!(BlockUsersQuery::new().after("").validate().is_err());
+    assert!(BlockUsersQuery::new().after(" ").validate().is_err());
+    assert!(BlockUsersQuery::new().after("a\u{7}b").validate().is_err());
+    assert!(BlockUsersQuery::new().after("a").validate().is_ok());
+
+    let page: BlockedUsersPage = serde_json::from_str(
+        r#"{"data":[{"wa_id":"1"}],"paging":{"next":"https://x.test/next","cursors":{"before":"b","after":"QVFIU"}}}"#,
+    )
+    .unwrap();
+    assert!(page.has_next_page());
+    assert_eq!(page.next_cursor(), Some("QVFIU"));
+
+    // An empty cursor is the same as none: following it would re-read the page.
+    let blank: BlockedUsersPage =
+        serde_json::from_str(r#"{"data":[],"paging":{"cursors":{"after":""}}}"#).unwrap();
+    assert_eq!(blank.next_cursor(), None);
+    assert_eq!(BlockedUsersPage::default().next_cursor(), None);
+}
+
+#[test]
 fn template_messages_cover_every_setter() {
     let template = TemplateMessage::new("hello", "de")
         .language_policy("deterministic")
