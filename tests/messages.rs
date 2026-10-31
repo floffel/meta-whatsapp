@@ -853,6 +853,57 @@ fn catalog_text_bounds_follow_the_interactive_limits() {
 }
 
 #[test]
+fn single_product_body_counts_bytes_and_footer_counts_characters() {
+    // The body cap is a byte cap. 600 "ä" are 600 characters but 1200 bytes, so
+    // an implementation that counted characters would wave this through.
+    assert_rejected(
+        MessageRequest::new(
+            "1",
+            SingleProductMessage::new("1", "sku").body("ä".repeat(600)),
+        ),
+        "interactive.body.text",
+    );
+
+    // …and 1024 bytes of multi-byte text is still accepted: the cap is bytes,
+    // not ASCII.
+    let mut at_byte_limit = "€".repeat(341); // 1023 bytes, 341 characters
+    at_byte_limit.push('x'); // 1024 bytes, 342 characters
+    assert!(MessageRequest::new(
+        "1",
+        SingleProductMessage::new("1", "sku").body(at_byte_limit)
+    )
+    .to_json()
+    .is_ok());
+
+    // The footer cap is a character cap: 60 "ä" are 120 bytes and must pass, so
+    // an implementation that counted bytes would refuse a valid footer.
+    assert!(MessageRequest::new(
+        "1",
+        SingleProductMessage::new("1", "sku").footer("ä".repeat(60))
+    )
+    .to_json()
+    .is_ok());
+    assert_rejected(
+        MessageRequest::new(
+            "1",
+            SingleProductMessage::new("1", "sku").footer("ä".repeat(61)),
+        ),
+        "interactive.footer.text",
+    );
+}
+
+#[test]
+fn catalog_ids_are_opaque_so_non_ascii_passes() {
+    // Both ids are opaque strings (the contract gives them no charset and no
+    // length), so a non-ASCII id is not a validation error.
+    let message = SingleProductMessage::new("katalog-ü", "sku-😀").body("Grüße");
+    assert_eq!(
+        MessageRequest::new("1", message).to_json().unwrap()["interactive"]["action"],
+        json!({ "catalog_id": "katalog-ü", "product_retailer_id": "sku-😀" })
+    );
+}
+
+#[test]
 fn catalog_ids_must_be_present_and_printable() {
     assert_rejected(
         MessageRequest::new("1", SingleProductMessage::new("", "sku")),
