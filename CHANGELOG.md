@@ -10,6 +10,21 @@ of the README.
 ## [Unreleased]
 
 ### Added
+- Blocklist paging (#41). `blocked_users()` reported `has_next_page()` but gave
+  no way to reach the next page, so any account with more blocked numbers than
+  one page was truncated silently. `BlockedUsersPage::next_cursor()` exposes the
+  `paging.cursors.after` value (an empty cursor counts as absent),
+  `BlockUsersQuery` carries that cursor plus an optional `limit`, and
+  `WhatsAppClient::blocked_users_after` / `blocked_users_with` take it back
+  percent-encoded. `WhatsAppClient::all_blocked_users` and
+  `all_blocked_users_with` walk the cursor until a page carries none — stopping
+  also on the cursor that produced the page, which no working API repeats but
+  would otherwise loop forever — and return every `BlockedUser` rather than the
+  first page. A blank or control-character cursor and a `limit` of `0` are
+  `Error::Validation` before a URL is built. Covered by recording-transport
+  tests for the encoded query, the two-page walk, the repeated-cursor stop, a
+  `next` link without a cursor, the rejection matrix and the 0/1 page-size
+  boundary, plus a proptest pinning the cursor round trip.
 - Typed inbound flow replies. `InteractiveReply::nfm_reply` was an untyped
   `serde_json::Value`; it is now a `FlowReply` (`name`, `body`, `response_json`,
   plus `extra` for members Meta adds later) reachable through

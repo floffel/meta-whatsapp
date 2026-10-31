@@ -104,7 +104,7 @@ pub mod usage;
 pub mod webhook;
 
 pub use business::{
-    BlockChange, BlockOutcome, BlockedUser, BlockedUsersPage, BusinessProfile,
+    BlockChange, BlockOutcome, BlockUsersQuery, BlockedUser, BlockedUsersPage, BusinessProfile,
     BusinessProfileUpdate, MessagingLimitTier, PhoneNumberInfo, RegisterRequest,
     RegistrationBackup, SuccessOutcome, TwoStepVerificationRequest, VerificationPin,
     VERIFICATION_PIN_LEN,

@@ -40,9 +40,10 @@ use std::time::Duration;
 use serde_json::{json, Value};
 
 use crate::business::{
-    block_users_payload, validate_field_list, BlockOutcome, BlockedUsersPage, BusinessProfile,
-    BusinessProfileUpdate, PhoneNumberInfo, RegisterRequest, RegistrationBackup, SuccessOutcome,
-    TwoStepVerificationRequest, VerificationPin, PHONE_NUMBER_FIELDS,
+    block_users_payload, validate_field_list, BlockOutcome, BlockUsersQuery, BlockedUser,
+    BlockedUsersPage, BusinessProfile, BusinessProfileUpdate, PhoneNumberInfo, RegisterRequest,
+    RegistrationBackup, SuccessOutcome, TwoStepVerificationRequest, VerificationPin,
+    PHONE_NUMBER_FIELDS,
 };
 use crate::error::{Error, Result};
 use crate::media::{parse_retry_after, validate_media_id, MediaBytes, MediaInfo, MediaUpload};
@@ -1123,7 +1124,11 @@ impl<T: Transport> WhatsAppClient<T> {
         PhoneNumberInfo::parse(&response.json()?)
     }
 
-    /// Lists the blocked users of the bound number, one page at a time.
+    /// Lists the blocked users of the bound number — the first page only.
+    ///
+    /// For the page after this one, pass [`BlockedUsersPage::next_cursor`] to
+    /// [`WhatsAppClient::blocked_users_after`]; to read the whole blocklist in
+    /// one call, use [`WhatsAppClient::all_blocked_users`].
     ///
     /// ```
     /// # use meta_whatsapp::{Result, Transport, WhatsAppClient, transport::{Request, Response}};
@@ -1149,9 +1154,170 @@ impl<T: Transport> WhatsAppClient<T> {
     ///
     /// Transport and Graph API errors; this is a read, so 5xx is retried.
     pub async fn blocked_users(&self) -> Result<BlockedUsersPage> {
-        let url = self.block_users_url();
+        self.blocked_users_with(&BlockUsersQuery::new()).await
+    }
+
+    /// Reads the blocklist page that follows `cursor`.
+    ///
+    /// A cursor is opaque and comes from
+    /// [`BlockedUsersPage::next_cursor`]; it is percent-encoded into the query.
+    ///
+    /// ```
+    /// # use meta_whatsapp::{Result, Transport, WhatsAppClient, transport::{Request, Response}};
+    /// # struct Mock;
+    /// # impl Transport for Mock {
+    /// #     async fn execute(&self, request: Request<'_>) -> Result<Response> {
+    /// #         assert!(request.url.ends_with("/block_users?after=QVFIU"));
+    /// #         Ok(Response::new(
+    /// #             200,
+    /// #             std::iter::empty(),
+    /// #             br#"{"data":[{"wa_id":"16505551235"}]}"#.to_vec(),
+    /// #         ))
+    /// #     }
+    /// # }
+    /// # async fn demo() -> Result<()> {
+    /// let client = WhatsAppClient::new("1", "t", Mock);
+    /// let page = client.blocked_users_after("QVFIU").await?;
+    /// assert_eq!(page.data[0].wa_id.as_deref(), Some("16505551235"));
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an empty, blank or control-character cursor,
+    /// which never reaches the network; then transport, Graph API and decoding
+    /// errors like [`WhatsAppClient::blocked_users`].
+    pub async fn blocked_users_after(&self, cursor: &str) -> Result<BlockedUsersPage> {
+        self.blocked_users_with(&BlockUsersQuery::new().after(cursor))
+            .await
+    }
+
+    /// Reads one blocklist page for an explicit [`BlockUsersQuery`].
+    ///
+    /// ```
+    /// # use meta_whatsapp::{Result, Transport, WhatsAppClient, transport::{Request, Response}};
+    /// # use meta_whatsapp::business::BlockUsersQuery;
+    /// # struct Mock;
+    /// # impl Transport for Mock {
+    /// #     async fn execute(&self, request: Request<'_>) -> Result<Response> {
+    /// #         assert!(request.url.ends_with("/block_users?limit=2&after=QVFIU"));
+    /// #         Ok(Response::new(200, std::iter::empty(), br#"{"data":[]}"#.to_vec()))
+    /// #     }
+    /// # }
+    /// # async fn demo() -> Result<()> {
+    /// let query = BlockUsersQuery::new().limit(2).after("QVFIU");
+    /// let page = WhatsAppClient::new("1", "t", Mock).blocked_users_with(&query).await?;
+    /// assert!(page.data.is_empty());
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for a limit of `0` or an unusable cursor, before
+    /// anything is sent; then transport, Graph API and decoding errors.
+    pub async fn blocked_users_with(&self, query: &BlockUsersQuery) -> Result<BlockedUsersPage> {
+        query.validate()?;
+        let rendered = query.query_string();
+        let url = if rendered.is_empty() {
+            self.block_users_url()
+        } else {
+            format!("{}?{rendered}", self.block_users_url())
+        };
         let response = self.execute(Request::get(&url, &self.token)).await?;
         serde_json::from_slice(response.body()).map_err(Error::from)
+    }
+
+    /// Reads the whole blocklist, following the cursor until Meta stops
+    /// paging.
+    ///
+    /// One request per page, in order. The walk ends when a page carries no
+    /// `paging.cursors.after` — including the case where Meta sends `next`
+    /// without a cursor, which cannot be followed — or when a page hands back
+    /// the cursor that produced it, which no working API does but would
+    /// otherwise loop forever. Nothing is deduplicated: the list is exactly
+    /// what Meta returned, page by page.
+    ///
+    /// ```
+    /// # use meta_whatsapp::{Result, Transport, WhatsAppClient, transport::{Request, Response}};
+    /// # struct TwoPages;
+    /// # impl Transport for TwoPages {
+    /// #     async fn execute(&self, request: Request<'_>) -> Result<Response> {
+    /// #         let body = if request.url.contains("after=QVFIU") {
+    /// #             br#"{"data":[{"wa_id":"2"}]}"#.to_vec()
+    /// #         } else {
+    /// #             br#"{"data":[{"wa_id":"1"}],"paging":{"cursors":{"after":"QVFIU"}}}"#.to_vec()
+    /// #         };
+    /// #         Ok(Response::new(200, std::iter::empty(), body))
+    /// #     }
+    /// # }
+    /// # async fn demo() -> Result<()> {
+    /// let users = WhatsAppClient::new("1", "t", TwoPages).all_blocked_users().await?;
+    /// assert_eq!(users.len(), 2);
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// The first failing page ends the walk: transport, Graph API and decoding
+    /// errors are returned instead of a truncated list, so a partial answer is
+    /// never mistaken for the whole blocklist.
+    pub async fn all_blocked_users(&self) -> Result<Vec<BlockedUser>> {
+        self.all_blocked_users_with(&BlockUsersQuery::new()).await
+    }
+
+    /// Reads the whole blocklist from `query.after` on, at `query.limit` per
+    /// page.
+    ///
+    /// `query.after` is the starting cursor, so a walk can be resumed; `None`
+    /// starts at the first page.
+    ///
+    /// ```
+    /// # use meta_whatsapp::{Result, Transport, WhatsAppClient, transport::{Request, Response}};
+    /// # use meta_whatsapp::business::BlockUsersQuery;
+    /// # struct Mock;
+    /// # impl Transport for Mock {
+    /// #     async fn execute(&self, _: Request<'_>) -> Result<Response> {
+    /// #         Ok(Response::new(200, std::iter::empty(), br#"{"data":[]}"#.to_vec()))
+    /// #     }
+    /// # }
+    /// # async fn demo() -> Result<()> {
+    /// let query = BlockUsersQuery::new().limit(100).after("QVFIU");
+    /// let users = WhatsAppClient::new("1", "t", Mock).all_blocked_users_with(&query).await?;
+    /// assert!(users.is_empty());
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an unusable cursor or a limit of `0`, before
+    /// the first request; then the first failing page's transport, Graph API or
+    /// decoding error.
+    pub async fn all_blocked_users_with(
+        &self,
+        query: &BlockUsersQuery,
+    ) -> Result<Vec<BlockedUser>> {
+        query.validate()?;
+        let mut page_query = query.clone();
+        let mut seen = query.after.clone();
+        let mut users = Vec::new();
+        loop {
+            let page = self.blocked_users_with(&page_query).await?;
+            let next = page.next_cursor().map(str::to_owned);
+            users.extend(page.data);
+            let Some(cursor) = next else { break };
+            if seen.as_deref() == Some(cursor.as_str()) {
+                // A page that points at itself would loop forever; the walk
+                // ends with what has been read.
+                break;
+            }
+            seen = Some(cursor.clone());
+            page_query.after = Some(cursor);
+        }
+        Ok(users)
     }
 
     /// Adds numbers to the blocklist.
