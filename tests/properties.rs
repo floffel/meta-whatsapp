@@ -5,8 +5,9 @@ use std::time::Duration;
 
 use meta_whatsapp::business::{
     block_users_payload, validate_block_user, validate_field_list, validate_verification_pin,
-    BusinessProfile, BusinessProfileUpdate, MessagingLimitTier, QualityRating, SuccessOutcome,
-    VerificationPin, BLOCK_USER_MAX_DIGITS, BLOCK_USER_MIN_DIGITS, VERIFICATION_PIN_LEN,
+    BlockUsersQuery, BusinessProfile, BusinessProfileUpdate, MessagingLimitTier, QualityRating,
+    SuccessOutcome, VerificationPin, BLOCK_USER_MAX_DIGITS, BLOCK_USER_MIN_DIGITS,
+    VERIFICATION_PIN_LEN,
 };
 use meta_whatsapp::media::{validate_media_id, MAX_MEDIA_ID_LEN};
 use meta_whatsapp::message::{CAPTION_MAX_BYTES, HEADER_MAX_CHARS};
@@ -452,6 +453,26 @@ proptest! {
             let decoded = percent_decode_str(&raw).decode_utf8().unwrap();
             prop_assert_eq!(decoded.as_ref(), expected.as_str());
         }
+    }
+
+    /// Blocklist cursors survive the wire form, and the rendered query stays
+    /// inside a conservative URL alphabet.
+    #[test]
+    fn blocklist_queries_are_percent_encoded(cursor in ".{1,64}", limit in 1_u32..10_000) {
+        let rendered = BlockUsersQuery::new()
+            .limit(limit)
+            .after(&cursor)
+            .query_string();
+        prop_assert!(rendered.chars().all(|c| c.is_ascii_alphanumeric()
+            || matches!(c, '%' | '&' | '=' | '-' | '_' | '.' | '~')));
+        let limit_part = format!("limit={limit}");
+        prop_assert!(rendered.contains(&limit_part));
+        let encoded = rendered
+            .split('&')
+            .find_map(|part| part.strip_prefix("after="))
+            .unwrap();
+        let decoded = percent_decode_str(encoded).decode_utf8().unwrap();
+        prop_assert_eq!(decoded.as_ref(), cursor.as_str());
     }
 
     /// Rendering is stable: JSON in, same JSON out (no field loss).

@@ -206,6 +206,10 @@ Account administration for the number the client is bound to:
 | `phone_number_info` | `GET /{phone_number_id}?fields=…` | `PhoneNumberInfo` (quality rating, messaging-limit tier, account mode, display-name and 2FA status) |
 | `phone_number_info_with` | same, explicit field list | same, but you choose the fields |
 | `blocked_users` | `GET /{phone_number_id}/block_users` | `BlockedUsersPage` (with paging) |
+| `blocked_users_after` | same, `?after=…` | the next page, from `BlockedUsersPage::next_cursor()` |
+| `blocked_users_with` | same, `?limit=…&after=…` | one page for an explicit `BlockUsersQuery` |
+| `all_blocked_users` | same, cursor after cursor | `Vec<BlockedUser>` — the whole blocklist |
+| `all_blocked_users_with` | same, from `BlockUsersQuery::after` | same, resumable and at a chosen page size |
 | `block_users` | `POST /{phone_number_id}/block_users` | `BlockOutcome` (`added_users`) |
 | `unblock_users` | `DELETE /{phone_number_id}/block_users` (ids in the body) | `BlockOutcome` (`removed_users`) |
 
@@ -214,6 +218,15 @@ exists if it is exactly six ASCII digits, is `Debug`- and `Display`-redacted, ha
 no getter and no `Default`, and never appears in an error message. They are
 non-idempotent — a 5xx or a lost answer is `Error::Ambiguous`, never a silent
 re-send (see *Delivery semantics*).
+
+The blocklist is cursor-paged. `BlockedUsersPage::next_cursor()` returns the
+`paging.cursors.after` value of the page just read, `blocked_users_after` and
+`blocked_users_with` take it back (percent-encoded, together with an optional
+`limit`), and `all_blocked_users` walks the cursor until a page carries none —
+it also stops when a page hands back the cursor that produced it, and it never
+deduplicates, so the `Vec` is exactly what Meta returned, page by page. A blank
+or control-character cursor and a `limit` of `0` are `Error::Validation` before
+any request is built.
 
 Quality and limits are typed but permissive: `QualityRating` (GREEN/YELLOW/RED/NA)
 and `MessagingLimitTier` (TIER_50 … TIER_UNLIMITED) keep an unknown value as
