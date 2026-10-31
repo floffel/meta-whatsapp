@@ -30,7 +30,7 @@ use serde_json::{Map, Value};
 use subtle::ConstantTimeEq;
 
 use crate::error::{Error, Result};
-use crate::template::Paging;
+use crate::template::{encode_query_value, Paging};
 
 /// Maximum length of the profile `about` text, in characters.
 ///
@@ -939,6 +939,154 @@ impl BlockedUsersPage {
             .as_ref()
             .and_then(|paging| paging.next.as_ref())
             .is_some()
+    }
+
+    /// The `after` cursor of this page, if Meta sent one.
+    ///
+    /// This is the value [`crate::WhatsAppClient::blocked_users_after`] takes;
+    /// [`crate::WhatsAppClient::all_blocked_users`] follows it for you. An empty
+    /// cursor counts as absent, so a page cannot ask for itself.
+    ///
+    /// ```
+    /// use meta_whatsapp::business::BlockedUsersPage;
+    ///
+    /// let page: BlockedUsersPage = serde_json::from_str(
+    ///     r#"{"data":[],"paging":{"cursors":{"after":"QVFIU"}}}"#,
+    /// )?;
+    /// assert_eq!(page.next_cursor(), Some("QVFIU"));
+    ///
+    /// let last: BlockedUsersPage = serde_json::from_str(r#"{"data":[]}"#)?;
+    /// assert_eq!(last.next_cursor(), None);
+    /// # Ok::<(), serde_json::Error>(())
+    /// ```
+    #[must_use]
+    pub fn next_cursor(&self) -> Option<&str> {
+        self.paging
+            .as_ref()
+            .and_then(|paging| paging.cursors.as_ref())
+            .and_then(|cursors| cursors.after.as_deref())
+            .filter(|cursor| !cursor.is_empty())
+    }
+}
+
+/// Query for `GET /{phone-number-id}/block_users`.
+///
+/// The blocklist is cursor-paged: `limit` picks the page size and `after` is
+/// the cursor of the page you already have. Both are optional, and an empty
+/// query renders an empty string so the plain endpoint keeps its URL.
+///
+/// ```
+/// use meta_whatsapp::business::BlockUsersQuery;
+///
+/// let query = BlockUsersQuery::new().limit(50).after("QVFIU");
+/// assert_eq!(query.query_string(), "limit=50&after=QVFIU");
+/// assert_eq!(BlockUsersQuery::new().query_string(), "");
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct BlockUsersQuery {
+    /// Page size; `None` leaves Meta's default. Meta documents no maximum for
+    /// this edge, so only a zero is refused.
+    pub limit: Option<u32>,
+    /// Cursor from [`BlockedUsersPage::next_cursor`].
+    pub after: Option<String>,
+}
+
+impl BlockUsersQuery {
+    /// The first page, at Meta's default page size.
+    ///
+    /// ```
+    /// use meta_whatsapp::business::BlockUsersQuery;
+    /// assert_eq!(BlockUsersQuery::new(), BlockUsersQuery::default());
+    /// ```
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Sets the page size.
+    ///
+    /// ```
+    /// use meta_whatsapp::business::BlockUsersQuery;
+    /// assert_eq!(BlockUsersQuery::new().limit(50).limit, Some(50));
+    /// ```
+    #[must_use]
+    pub fn limit(mut self, limit: u32) -> Self {
+        self.limit = Some(limit);
+        self
+    }
+
+    /// Sets the `after` cursor, as returned by
+    /// [`BlockedUsersPage::next_cursor`].
+    ///
+    /// ```
+    /// use meta_whatsapp::business::BlockUsersQuery;
+    /// assert_eq!(
+    ///     BlockUsersQuery::new().after("QVFIU").after.as_deref(),
+    ///     Some("QVFIU")
+    /// );
+    /// ```
+    #[must_use]
+    pub fn after(mut self, cursor: impl Into<String>) -> Self {
+        self.after = Some(cursor.into());
+        self
+    }
+
+    /// Checks the page size and the cursor.
+    ///
+    /// ```
+    /// use meta_whatsapp::business::BlockUsersQuery;
+    ///
+    /// assert!(BlockUsersQuery::new().limit(1).after("QVFIU").validate().is_ok());
+    /// assert!(BlockUsersQuery::new().limit(0).validate().is_err(), "0 is not a page size");
+    /// assert!(BlockUsersQuery::new().after("").validate().is_err(), "an empty cursor is not a page");
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for a limit of `0` or a cursor that is empty,
+    /// whitespace-only or contains a control character — none of those is a
+    /// cursor Meta hands out, so they are caught before a URL is built.
+    pub fn validate(&self) -> Result<()> {
+        if let Some(limit) = self.limit {
+            if limit == 0 {
+                return Err(Error::validation(
+                    "limit",
+                    "must be at least 1, got 0 (omit it for Meta's default)",
+                ));
+            }
+        }
+        if let Some(cursor) = &self.after {
+            if cursor.trim().is_empty() {
+                return Err(Error::validation("after", "must not be empty"));
+            }
+            if cursor.chars().any(char::is_control) {
+                return Err(Error::validation(
+                    "after",
+                    "must not contain control characters",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Renders the query string without the leading `?` — empty when neither
+    /// field is set.
+    ///
+    /// ```
+    /// use meta_whatsapp::business::BlockUsersQuery;
+    ///
+    /// assert_eq!(BlockUsersQuery::new().after("a+b/c=").query_string(), "after=a%2Bb%2Fc%3D");
+    /// ```
+    #[must_use]
+    pub fn query_string(&self) -> String {
+        let mut parts = Vec::new();
+        if let Some(limit) = self.limit {
+            parts.push(format!("limit={limit}"));
+        }
+        if let Some(after) = &self.after {
+            parts.push(format!("after={}", encode_query_value(after)));
+        }
+        parts.join("&")
     }
 }
 

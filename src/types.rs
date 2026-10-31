@@ -937,7 +937,8 @@ pub struct StatusError {
 }
 
 impl WebhookPayload {
-    /// The changes that carry a `value.metadata.phone_number_id`, paired with it.
+    /// The changes that carry a `value.metadata`, paired with that change's
+    /// `phone_number_id` (empty when the metadata block omits it).
     ///
     /// Both routing iterators read the id from the same place, so the filter
     /// lives here once: a change without `metadata` has no id to attribute an
