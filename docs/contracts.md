@@ -21,6 +21,10 @@ Secondary sources — the developer reference pages the spec links to:
 * Phone-number registration / deregistration: `https://developers.facebook.com/docs/whatsapp/cloud-api/reference` (the `/{PHONE_NUMBER_ID}/register` and `/{PHONE_NUMBER_ID}/deregister` edges)
 * Two-step verification PIN: `https://developers.facebook.com/docs/whatsapp/cloud-api/reference/two-step-verification`
 * Quality rating background: `https://www.facebook.com/business/help/896873687365001`
+* Address messages (India only, `interactive.type = address_message`):
+  `https://developers.facebook.com/documentation/business-messaging/whatsapp/messages/address-messages/`
+  — field table, the four `action.parameters` members, and both the request and
+  the `nfm_reply` webhook examples.
 
 ## Endpoints used
 
@@ -65,6 +69,8 @@ Secondary sources — the developer reference pages the spec links to:
 | `RegisterRequest` / `TwoStepVerificationRequest` | register edge, two-step reference | register sends `messaging_product` + `pin` (+ optional `backup`); two-step sends `pin` alone. |
 | `WebhookSubscriptions` / `SubscribedApp` | `SubscribedAppsResponse`, `SubscribedApp` | Each entry may wrap the app in `whatsapp_business_api_data` (spec example) — both parse. |
 | `SubscriptionConfig` | `SubscriptionRequest` | `override_callback_uri`, `verify_token`. |
+| `AddressMessage` / `AddressValues` / `SavedAddress` / `AddressValidationError` | `interactive` with `type` and `action.name` = `address_message` | Values in the guide's field table; `in_pin_code` max 6 characters is the only per-field limit it publishes. `country` is required (ISO 3166-1 alpha-2) and is an action parameter, not a value. `validation_errors` is a field → message object. The number of `saved_addresses` is not bounded — see *unverified*, README. |
+| `AddressReply` | `interactive.nfm_reply.response_json` (a JSON string) | `{"saved_address_id": …, "values": {…}}` from the guide's submission example; unknown keys stay in `extra`. |
 | `BusinessUseCaseUsage` / `UseCaseUsage` | header `x-business-use-case-usage` | Header value is a JSON object keyed by business id, each value an array of `{type, call_count, total_cputime, total_time, estimated_time_to_regain_access}`. |
 | `SingleProductMessage` | `Interactive` with `type: product`, `ActionObject` variant `{catalog_id, product_retailer_id}` | `HeaderObject` says a header "cannot be set for 'product' type", so the struct has none. `BodyObject` is "optional for 'product' type"; footer optional. Body 1024, footer 60. |
 | `MultiProductMessage` / `ProductSection` / `ProductItem` | `Interactive` with `type: product_list`, `ActionObject` variant `{catalog_id, sections}`, `SectionObject.product_items` | Header "required for 'product_list'", body "required for other interactive message types" — both are constructor arguments. `sections` 1–10, `product_items` 1–30 per section, section `title` max 24 and required once there is more than one section, header/footer 60, body 1024. Meta's reference caps the whole message at 30 products, so that cap applies on top of the per-section one. |
@@ -96,6 +102,14 @@ Secondary sources — the developer reference pages the spec links to:
 * **No field-level webhook subscription.** The WABA node has no
   `subscribed_fields`; that parameter belongs to the app-level
   `/{app_id}/subscriptions` endpoint, which is out of scope (README).
+* **The address family is reference-only.** `address_message` does not appear in
+  the v23.0 OpenAPI description at all — it is modelled from the reference
+  page's field table and examples. That page scopes the feature to India and
+  lists only the Indian fields; the Singapore-only names (`sg_post_code`,
+  `unit_number`) survive only in the On-Premises guide, which Meta sunset on
+  2025-10-23, so they are not modelled. A `country` is checked for shape, not
+  against that list: an unsupported market is Meta's decision to reject, and
+  guessing the list would turn a future market into a local failure.
 * **Required catalog fields live in the constructor.** For `product_list` the
   spec makes `header` and `body` mandatory and for `product` it forbids the
   header; `MultiProductMessage::new` therefore takes header and body, and

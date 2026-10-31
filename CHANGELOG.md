@@ -50,6 +50,23 @@ of the README.
   `flow_action_payload.data`: a non-object payload is now `Error::Validation`
   instead of being rendered and sent. Closes #8 together with the typed reply
   above.
+- Address messages: `AddressMessage` renders Meta's `address_message`
+  interactive form (`header`, `body`, `footer` and the action parameters
+  `country`, `values`, `saved_addresses`, `validation_errors`), validated before
+  the request is built — a two-letter ISO 3166-1 `country`, a non-empty body,
+  `in_pin_code` ≤ 6 characters, every other value ≤ 1024 UTF-8 bytes, unique
+  saved-address ids and at most one validation error per field.
+  `AddressValues` carries the eleven documented fields under their wire names
+  (`in_pin_code` is the postal code, `address` the street line); unknown keys
+  survive in `extra`. `InteractiveMessage::Address`, `From<AddressMessage> for
+  MessageBody`, and a new `address` module with `AddressReply`, which decodes
+  the `nfm_reply.response_json` string of a submitted address. Closes #22.
+- Tests: the exact JSON body for a full and a minimal form, one boundary pair
+  per limit (country length, body bytes, field bytes, pin-code characters,
+  phone digits, header/footer, id and message lengths), the documented webhook
+  payload, property tests for the byte limits and the wire round-trip, and an
+  `address_message` seed for the existing `webhook_payload` fuzz target, which
+  now decodes every `nfm_reply` it meets.
 - Catalog product messages (#19): `SingleProductMessage` (`interactive.type`
   `product`) and `MultiProductMessage` (`product_list`) with `ProductSection` and
   `ProductItem`, plus the matching `InteractiveMessage::Product` /
