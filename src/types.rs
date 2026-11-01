@@ -399,9 +399,30 @@ impl Message {
         self.text.as_ref().map(|text| text.body.as_str())
     }
 
+    /// The flow reply, when this message is the `nfm_reply` of a finished flow.
+    ///
+    /// ```rust
+    /// use meta_whatsapp::Message;
+    ///
+    /// let message: Message = serde_json::from_str(
+    ///     r#"{"id":"1","from":"2","type":"interactive","interactive":{"type":"nfm_reply",
+    ///         "nfm_reply":{"name":"flow","body":"Sent",
+    ///                      "response_json":"{\"screen\":\"SUMMARY\",\"data\":{\"ok\":true}}"}}}"#,
+    /// ).unwrap();
+    /// let reply = message.flow_reply().unwrap();
+    /// assert_eq!(reply.name.as_deref(), Some("flow"));
+    /// assert_eq!(reply.response().unwrap().field("screen"), Some("SUMMARY"));
+    /// ```
+    #[must_use]
+    pub fn flow_reply(&self) -> Option<&FlowReply> {
+        self.interactive
+            .as_ref()
+            .and_then(|interactive| interactive.nfm_reply.as_ref())
+    }
+
     /// `timestamp` parsed as unix seconds.
     ///
-    /// ```
+    /// ```rust
     /// use meta_whatsapp::Message;
     ///
     /// let message: Message = serde_json::from_str(
@@ -412,32 +433,6 @@ impl Message {
     #[must_use]
     pub fn timestamp_secs(&self) -> Option<u64> {
         self.timestamp.trim().parse().ok()
-    }
-
-    /// The flow completion reply, when this message answers a Flow
-    /// (`interactive.type == "nfm_reply"`).
-    ///
-    /// ```
-    /// use meta_whatsapp::Message;
-    ///
-    /// let message: Message = serde_json::from_str(
-    ///     r#"{"id":"1","from":"2","type":"interactive","interactive":{
-    ///         "type":"nfm_reply","nfm_reply":{"name":"flow","body":"Sent",
-    ///         "response_json":"{\"flow_token\":\"tok\"}"}}}"#,
-    /// )?;
-    /// assert_eq!(message.flow_reply().unwrap().response()?.flow_token(), Some("tok"));
-    ///
-    /// let plain: Message = serde_json::from_str(
-    ///     r#"{"id":"1","from":"2","type":"text","text":{"body":"hi"}}"#,
-    /// )?;
-    /// assert!(plain.flow_reply().is_none());
-    /// # Ok::<(), Box<dyn std::error::Error>>(())
-    /// ```
-    #[must_use]
-    pub fn flow_reply(&self) -> Option<&FlowReply> {
-        self.interactive
-            .as_ref()
-            .and_then(|interactive| interactive.nfm_reply.as_ref())
     }
 }
 
@@ -760,7 +755,10 @@ impl FlowResponse {
 
 /// Reply to an interactive message.
 ///
-/// ```
+/// A flow reply (`type == "nfm_reply"`) is decoded into [`FlowReply`] here, so
+/// the stringified `response_json` does not have to be parsed again downstream.
+///
+/// ```rust
 /// use meta_whatsapp::types::InteractiveReply;
 ///
 /// let reply: InteractiveReply = serde_json::from_str(

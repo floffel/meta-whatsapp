@@ -343,6 +343,8 @@ with a token the API just rejected.
 * Both `changes[].value` shapes parse: message/status events with typed fields,
   and account-level events (`message_template_status_update`,
   `phone_number_quality_update`, …) whose keys land in `ChangeValue::extra`.
+* `interactive.nfm_reply` parses into `FlowReply` (`payload.flow_replies()`), with
+  the stringified `response_json` decoded once.
 * Unknown fields survive in `extra`; unknown `type` strings stay strings;
   duplicate *known* keys are rejected with a typed JSON error instead of being
   guessed at.

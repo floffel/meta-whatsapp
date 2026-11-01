@@ -28,6 +28,10 @@ use serde_json::{json, Map, Value};
 
 use crate::address::AddressMessage;
 use crate::error::{Error, Result};
+use crate::flow::{
+    validate_screen_data, validate_screen_name, FLOW_CTA_MAX_CHARS, FLOW_MESSAGE_VERSION,
+    FLOW_TOKEN_MAX_BYTES,
+};
 use crate::media::MediaRef;
 use crate::template::TemplateMessage;
 
@@ -2187,7 +2191,7 @@ impl ListMessage {
 
 /// What a flow should do when the user taps the call-to-action.
 ///
-/// ```
+/// ```rust
 /// use meta_whatsapp::FlowAction;
 ///
 /// let navigate = FlowAction::navigate("WELCOME");
@@ -2200,7 +2204,7 @@ pub enum FlowAction {
     Navigate {
         /// Screen name defined in the flow.
         screen: String,
-        /// Optional initial data.
+        /// Initial data for that screen: a non-empty JSON object, or `None`.
         data: Option<serde_json::Value>,
     },
     /// Let the flow talk to your endpoint.
@@ -2210,7 +2214,7 @@ pub enum FlowAction {
 impl FlowAction {
     /// A `navigate` action for `screen`.
     ///
-    /// ```
+    /// ```rust
     /// use meta_whatsapp::FlowAction;
     /// assert!(matches!(FlowAction::navigate("S"), FlowAction::Navigate { .. }));
     /// ```
@@ -2243,22 +2247,35 @@ impl FlowAction {
         }
     }
 
+    /// A `navigate` action that pre-fills the first screen with `data`.
+    ///
+    /// `data` must be a non-empty JSON object; an empty object is refused
+    /// because Meta treats it as "no data" and the schema forbids it.
+    ///
+    /// ```rust
+    /// use meta_whatsapp::{FlowAction, FlowMessage, MessageRequest};
+    ///
+    /// let action = FlowAction::navigate_with("CHECKOUT", serde_json::json!({"zip": "01067"}));
+    /// let json = MessageRequest::new("1", FlowMessage::new("f", "Weiter", action)).to_json()?;
+    /// assert_eq!(json["interactive"]["action"]["parameters"]["flow_action_payload"]["data"]["zip"], "01067");
+    /// # Ok::<(), meta_whatsapp::Error>(())
+    /// ```
+    #[must_use]
+    pub fn navigate_with(screen: impl Into<String>, data: serde_json::Value) -> Self {
+        Self::Navigate {
+            screen: screen.into(),
+            data: Some(data),
+        }
+    }
+
     fn validate(&self) -> Result<()> {
         match self {
             Self::Navigate { screen, data } => {
-                require_non_empty(
-                    "interactive.action.parameters.flow_action_payload.screen",
-                    screen,
-                )?;
-                if let Some(data) = data {
-                    if !data.is_object() {
-                        return Err(Error::validation(
-                            "interactive.action.parameters.flow_action_payload.data",
-                            "must be a JSON object",
-                        ));
-                    }
+                validate_screen_name(screen)?;
+                match data {
+                    Some(data) => validate_screen_data(data),
+                    None => Ok(()),
                 }
-                Ok(())
             }
             Self::DataExchange => Ok(()),
         }
@@ -2320,7 +2337,12 @@ impl FlowMode {
 
 /// Interactive flow message (`WhatsApp` Flows).
 ///
-/// ```
+/// Two actions exist: `navigate` opens a screen you name (optionally pre-filled
+/// with a JSON object), `data_exchange` lets the flow call your endpoint. The
+/// message carries `flow_message_version` `"3"` unless you override it, and an
+/// empty `flow_token` is left off the wire so Meta's `unused` default applies.
+///
+/// ```rust
 /// use meta_whatsapp::{FlowAction, FlowMessage, MessageRequest};
 ///
 /// let json = MessageRequest::new(
@@ -2330,6 +2352,7 @@ impl FlowMode {
 /// .to_json()?;
 /// assert_eq!(json["interactive"]["action"]["parameters"]["flow_id"], "flow-123");
 /// assert_eq!(json["interactive"]["action"]["parameters"]["flow_cta"], "Buchen");
+/// assert_eq!(json["interactive"]["action"]["parameters"]["flow_message_version"], "3");
 /// # Ok::<(), meta_whatsapp::Error>(())
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2342,23 +2365,26 @@ pub struct FlowMessage {
     pub footer: Option<String>,
     /// Flow id from the Meta dashboard.
     pub flow_id: String,
-    /// Opaque token echoed back to your endpoint.
+    /// Opaque token echoed back to your endpoint; empty means Meta's `unused`.
     pub flow_token: String,
-    /// Call-to-action label (max 30 characters).
+    /// Call-to-action label (max [`FLOW_CTA_MAX_CHARS`] characters).
     pub cta: String,
     /// What happens on tap.
     pub action: FlowAction,
     /// Published or draft.
     pub mode: FlowMode,
+    /// Message version, [`FLOW_MESSAGE_VERSION`] by default.
+    pub flow_message_version: String,
 }
 
 impl FlowMessage {
     /// Builds a flow message; the body defaults to a generic prompt.
     ///
-    /// ```
+    /// ```rust
     /// use meta_whatsapp::{FlowAction, FlowMessage};
     /// let message = FlowMessage::new("f", "Öffnen", FlowAction::navigate("S"));
     /// assert_eq!(message.mode, meta_whatsapp::FlowMode::Published);
+    /// assert_eq!(message.flow_message_version, meta_whatsapp::flow::FLOW_MESSAGE_VERSION);
     /// ```
     pub fn new(flow_id: impl Into<String>, cta: impl Into<String>, action: FlowAction) -> Self {
         Self {
@@ -2370,6 +2396,7 @@ impl FlowMessage {
             cta: cta.into(),
             action,
             mode: FlowMode::Published,
+            flow_message_version: FLOW_MESSAGE_VERSION.to_string(),
         }
     }
 
@@ -2426,7 +2453,7 @@ impl FlowMessage {
 
     /// Selects the published or draft flow.
     ///
-    /// ```
+    /// ```rust
     /// use meta_whatsapp::{FlowAction, FlowMessage, FlowMode};
     /// assert_eq!(
     ///     FlowMessage::new("f", "c", FlowAction::DataExchange).mode(FlowMode::Draft).mode,
@@ -2439,9 +2466,29 @@ impl FlowMessage {
         self
     }
 
-    /// Checks ids, the CTA length and the action payload.
+    /// Overrides `flow_message_version`, which defaults to
+    /// [`FLOW_MESSAGE_VERSION`] (`"3"`).
     ///
+    /// ```rust
+    /// use meta_whatsapp::{FlowAction, FlowMessage, MessageRequest};
+    ///
+    /// let json = MessageRequest::new(
+    ///     "1",
+    ///     FlowMessage::new("f", "c", FlowAction::DataExchange).flow_message_version("4"),
+    /// )
+    /// .to_json()?;
+    /// assert_eq!(json["interactive"]["action"]["parameters"]["flow_message_version"], "4");
+    /// # Ok::<(), meta_whatsapp::Error>(())
     /// ```
+    #[must_use]
+    pub fn flow_message_version(mut self, version: impl Into<String>) -> Self {
+        self.flow_message_version = version.into();
+        self
+    }
+
+    /// Checks ids, the version, the CTA length and the action payload.
+    ///
+    /// ```rust
     /// use meta_whatsapp::{FlowAction, FlowMessage};
     ///
     /// assert!(FlowMessage::new("f", "c", FlowAction::DataExchange).validate().is_ok());
@@ -2450,7 +2497,8 @@ impl FlowMessage {
     ///
     /// # Errors
     ///
-    /// [`Error::Validation`] for empty ids or oversized text.
+    /// [`Error::Validation`] for empty ids, an oversized CTA or token, a malformed
+    /// screen id, or screen data that is not a non-empty JSON object.
     pub fn validate(&self) -> Result<()> {
         require_non_empty("interactive.body.text", &self.body)?;
         require_max_bytes("interactive.body.text", &self.body, CAPTION_MAX_BYTES)?;
@@ -2461,21 +2509,36 @@ impl FlowMessage {
             require_max_chars("interactive.footer.text", footer, HEADER_MAX_CHARS)?;
         }
         require_non_empty("interactive.action.parameters.flow_id", &self.flow_id)?;
-        require_max_chars("interactive.action.parameters.flow_cta", &self.cta, 30)?;
+        require_non_empty(
+            "interactive.action.parameters.flow_message_version",
+            &self.flow_message_version,
+        )?;
         require_non_empty("interactive.action.parameters.flow_cta", &self.cta)?;
+        require_max_chars(
+            "interactive.action.parameters.flow_cta",
+            &self.cta,
+            FLOW_CTA_MAX_CHARS,
+        )?;
         require_max_bytes(
             "interactive.action.parameters.flow_token",
             &self.flow_token,
-            1024,
+            FLOW_TOKEN_MAX_BYTES,
         )?;
         self.action.validate()
     }
 
     fn render(&self) -> Value {
         let mut parameters = Map::new();
-        parameters.insert("flow_message_version".into(), Value::String("3".into()));
+        parameters.insert(
+            "flow_message_version".into(),
+            Value::String(self.flow_message_version.clone()),
+        );
         parameters.insert("flow_id".into(), Value::String(self.flow_id.clone()));
-        parameters.insert("flow_token".into(), Value::String(self.flow_token.clone()));
+        // Meta defaults the token to "unused"; an empty string is not a token,
+        // so leave the field out instead of sending "".
+        if !self.flow_token.is_empty() {
+            parameters.insert("flow_token".into(), Value::String(self.flow_token.clone()));
+        }
         parameters.insert("flow_cta".into(), Value::String(self.cta.clone()));
         parameters.insert("mode".into(), Value::String(self.mode.as_str().into()));
         parameters.insert(

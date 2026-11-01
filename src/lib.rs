@@ -102,6 +102,7 @@ pub mod address;
 pub mod business;
 pub mod client;
 pub mod error;
+pub mod flow;
 pub mod media;
 pub mod message;
 pub mod retry;
@@ -125,6 +126,10 @@ pub use business::{
 };
 pub use client::{SendOutcome, WhatsAppClient, DEFAULT_API_VERSION};
 pub use error::{Error, Result, TransportPhase};
+pub use flow::{
+    validate_screen_data, validate_screen_name, FLOW_CTA_MAX_CHARS, FLOW_MESSAGE_VERSION,
+    FLOW_SCREEN_MAX_CHARS, FLOW_TOKEN_MAX_BYTES,
+};
 pub use media::{MediaBytes, MediaInfo, MediaRef, MediaUpload};
 pub use message::{
     AudioMessage, ButtonMessage, ContactCard, ContactEmail, ContactName, ContactOrg, ContactPhone,
