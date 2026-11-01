@@ -17,6 +17,7 @@ Secondary sources — the developer reference pages the spec links to:
 
 * Cloud API overview: `https://developers.facebook.com/docs/whatsapp/cloud-api`
 * Webhooks / subscription setup: `https://developers.facebook.com/docs/whatsapp/cloud-api/guides/set-up-webhooks`
+* Send / read a message: `https://developers.facebook.com/docs/whatsapp/cloud-api/reference/messages`
 * Block users: `https://developers.facebook.com/docs/business-messaging/whatsapp/block-users`
 * Phone-number registration / deregistration: `https://developers.facebook.com/docs/whatsapp/cloud-api/reference` (the `/{PHONE_NUMBER_ID}/register` and `/{PHONE_NUMBER_ID}/deregister` edges)
 * Two-step verification PIN: `https://developers.facebook.com/docs/whatsapp/cloud-api/reference/two-step-verification`
@@ -44,6 +45,7 @@ Secondary sources — the developer reference pages the spec links to:
 | `register`, `register_with_backup` | `POST /{phone-number-id}/register` | `/{Version}/{Phone-Number-ID}/register` |
 | `deregister` | `DELETE /{phone-number-id}/deregister` | `/{Version}/{Phone-Number-ID}/deregister` |
 | `set_two_step_verification_pin` | `POST /{phone-number-id}` (body `{"pin":"…"}`) | `/{Version}/{Phone-Number-ID}` |
+| `message_status` | `GET /{phone-number-id}?id={wamid}` | `/{Version}/{Phone-Number-ID}` |
 | `blocked_users` | `GET /{phone-number-id}/block_users` | `/{Version}/{Phone-Number-ID}/block_users` |
 | `blocked_users_after`, `blocked_users_with`, `all_blocked_users`, `all_blocked_users_with` | same, plus `?limit=…&after=…` (both optional) | same |
 | `block_users` | `POST /{phone-number-id}/block_users` | same |
@@ -77,6 +79,7 @@ Secondary sources — the developer reference pages the spec links to:
 | `FlowReply` / `FlowResponse` | not present in the v23 OpenAPI file | Shape comes from the flows-webhooks reference, `https://developers.facebook.com/docs/whatsapp/flows/reference/flowswebhooks/`: `interactive.type = "nfm_reply"`, and `interactive.nfm_reply` carries exactly three documented strings — `name`, `body`, `response_json`. The flow's answers, `flow_token` included, are *inside* `response_json` as a JSON document encoded in a string; there is no top-level token field. Decoding is fallible (`Error::Payload`) and the raw string is kept on the struct. |
 | `TemplateDefinition` / `TemplateUpdate` | `Create template` and `Edit template` request bodies | `name`, `language` (string, not the send-side object), `category`, `components[]` with `HEADER`/`BODY`/`FOOTER`/`BUTTONS`. Header formats TEXT, IMAGE, VIDEO, DOCUMENT, LOCATION; button types QUICK_REPLY, URL, COPY_CODE, PHONE_NUMBER, OTP. Limits: name 512 bytes, language 32 characters, header/footer 60 characters, body 1024 bytes, button label 25 characters, URL 2000 characters, copy-code example 15 characters, 10 buttons (max 2 URL, max 1 copy-code), 20 examples per component, 4 components, code expiration 1-90 minutes. Authentication templates use `add_security_recommendation` instead of body text and `code_expiration_minutes` in the footer. |
 | `TemplateAck` / `TemplateDeleteAck` | create, edit and delete responses | Create answers `{id, status, category}`, edit and delete `{ "success": true }`. Every field is optional and unknown members are kept. |
+| `MessageStatus` / `DeliveryStatus` | *Read a Message* response, `messages[]` | `id`, `status` ∈ {sent, delivered, read, failed}, `timestamp`, `recipient_id`, `errors[]` — the same field set the `statuses` webhook pushes as `Status`, read on demand instead. An unlisted status string is carried as `DeliveryStatus::Unknown`. The reference gives no format or length for a wamid, so `MAX_WAMID_LEN` (256 bytes) is this crate's own bound on what may enter the query string. |
 
 ## Deliberate divergences
 
@@ -99,6 +102,10 @@ Secondary sources — the developer reference pages the spec links to:
 * **Two-step verification is set, never disabled.** `POST /{PHONE_NUMBER_ID}` with a `pin` is the only write the reference offers; there is no endpoint to turn two-step verification off, so this crate exposes `set_two_step_verification_pin` (rotation) and no `disable`.
 * **The two-step body carries `pin` alone.** Unlike `register`, the reference does not send `messaging_product` there, so neither do we.
 * **`deregister` is treated as non-idempotent even though it is a `DELETE`.** `Repeatability::of_method` calls `DELETE` idempotent, which is right for reads like `delete_media` but wrong here: a repeated deregistration is a state change the caller has to see, so `deregister` overrides the verb rule and a 5xx surfaces as `Error::Ambiguous` instead of being re-sent.
+* **A non-string `status` is carried too.** `MessageStatus` decodes any JSON
+  shape for `status`: a string is parsed, `null` becomes the default unknown,
+  anything else is kept as its raw JSON text. Failing the whole response on one
+  unexpected field value would hide the delivery state the caller asked for.
 * **No field-level webhook subscription.** The WABA node has no
   `subscribed_fields`; that parameter belongs to the app-level
   `/{app_id}/subscriptions` endpoint, which is out of scope (README).

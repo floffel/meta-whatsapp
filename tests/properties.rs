@@ -12,6 +12,7 @@ use meta_whatsapp::business::{
 use meta_whatsapp::media::{validate_media_id, MAX_MEDIA_ID_LEN};
 use meta_whatsapp::message::{CAPTION_MAX_BYTES, HEADER_MAX_CHARS};
 use meta_whatsapp::retry::{Action, Attempt, Repeatability};
+use meta_whatsapp::status::{validate_wamid, DeliveryStatus, MessageStatus, MAX_WAMID_LEN};
 use meta_whatsapp::subscription::{validate_waba_id, WebhookSubscriptions};
 use meta_whatsapp::template::{
     TemplateDefinitionComponent, TEMPLATE_HEADER_MAX_CHARS, TEMPLATE_NAME_MAX_BYTES,
@@ -140,6 +141,104 @@ proptest! {
         prop_assert_eq!(accepted, charset_ok);
         if accepted {
             prop_assert!(!id.contains('/') && !id.contains('.') && !id.contains('?'));
+        }
+    }
+
+    /// A wamid is accepted exactly by the documented rules — non-empty, at most
+    /// [`MAX_WAMID_LEN`] bytes of the wamid alphabet, and no leading, trailing
+    /// or doubled `.` — and an accepted id can never break out of its query
+    /// value.
+    #[test]
+    fn wamid_acceptance_is_sound(id in ".{0,300}") {
+        let accepted = validate_wamid(&id).is_ok();
+        let documented = !id.is_empty()
+            && id.len() <= MAX_WAMID_LEN
+            && id
+                .bytes()
+                .all(|byte| {
+                    byte.is_ascii_alphanumeric()
+                        || matches!(byte, b'-' | b'_' | b'.' | b':' | b'+' | b'/' | b'=')
+                })
+            && !id.starts_with('.')
+            && !id.ends_with('.')
+            && !id.contains("..");
+        prop_assert_eq!(accepted, documented);
+
+        if accepted {
+            prop_assert!(
+                !id.contains('?')
+                    && !id.contains('&')
+                    && !id.contains('#')
+                    && !id.contains('%')
+                    && !id.contains(' ')
+                    && !id.contains('\0')
+                    && !id.contains('\n'),
+                "an accepted id must not be able to end its query value: {:?}",
+                id
+            );
+        }
+    }
+
+    /// Reading a status back is stable: whatever string arrives, parsing it and
+    /// re-parsing its wire spelling lands on the same value, and an unknown
+    /// status keeps the raw text (trimmed) instead of being rewritten.
+    #[test]
+    fn status_parsing_is_idempotent_and_keeps_the_unknown(raw in ".{0,40}") {
+        let parsed = DeliveryStatus::parse(&raw);
+        let rendered = serde_json::to_string(&parsed).unwrap_or_else(|err| panic!("{raw:?}: {err}"));
+        let reparsed: DeliveryStatus =
+            serde_json::from_str(&rendered).unwrap_or_else(|err| panic!("{rendered}: {err}"));
+        prop_assert_eq!(parsed.clone(), reparsed);
+        prop_assert_eq!(DeliveryStatus::parse(parsed.as_str()), parsed.clone());
+
+        let word = raw.trim().to_ascii_lowercase();
+        let known = matches!(word.as_str(), "sent" | "delivered" | "read" | "failed");
+        let collapsed = !matches!(parsed, DeliveryStatus::Unknown(_));
+        prop_assert_eq!(
+            known,
+            collapsed,
+            "only the four documented words collapse to a variant: {:?}",
+            raw
+        );
+        if let DeliveryStatus::Unknown(kept) = &parsed {
+            prop_assert_eq!(kept, raw.trim());
+        }
+    }
+
+    /// Permissive decoding (§7): a `status` of *any* JSON shape decodes. `null`
+    /// means "no status", a string is parsed, anything else is kept verbatim.
+    #[test]
+    fn any_status_value_decodes(value in arb_json()) {
+        let entry = serde_json::json!({"id": "wamid.1", "status": value});
+        let status: MessageStatus = serde_json::from_value(entry)
+            .unwrap_or_else(|err| panic!("{value} must decode as a status: {err}"));
+
+        let expected = match &value {
+            Value::String(text) => DeliveryStatus::parse(text),
+            Value::Null => DeliveryStatus::default(),
+            other => DeliveryStatus::Unknown(other.to_string()),
+        };
+        prop_assert_eq!(status.status, expected);
+        prop_assert_eq!(status.id, "wamid.1");
+    }
+
+    /// `parse_all` is total in the sense that matters: it never panics, and the
+    /// only things it reports are a body that cannot carry a status
+    /// (`Payload`) and an entry whose shape is unreadable (`Json`) — never a
+    /// transport, API or validation error, whatever the body looks like.
+    #[test]
+    fn parse_all_never_panics_and_only_reports_structural_errors(value in arb_json()) {
+        match MessageStatus::parse_all(&value) {
+            Ok(entries) => {
+                // Entries we accepted re-serialise into entries again.
+                let rendered = serde_json::to_value(&entries)
+                    .unwrap_or_else(|err| panic!("{value}: {err}"));
+                let again = MessageStatus::parse_all(&rendered)
+                    .unwrap_or_else(|err| panic!("round trip failed for {value}: {err}"));
+                prop_assert_eq!(again, entries, "a decoded entry must survive a round trip");
+            }
+            Err(Error::Payload(_) | Error::Json { .. }) => {}
+            Err(other) => prop_assert!(false, "unexpected error class for {value}: {other:?}"),
         }
     }
 

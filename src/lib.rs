@@ -17,6 +17,9 @@
 //!   the account (business profile, phone-number quality and limits,
 //! * [`address`] — the `address_message` form and the typed reply a customer
 //!   sends back.
+//!   reaction, interactive buttons/list/flow, templates), upload/download/delete
+//!   media, list templates, read the delivery status of a message you sent, and
+//!   blocklist, webhook subscriptions).
 //! * [`business`], [`subscription`], [`usage`] — the typed shapes behind that
 //!   administration surface, including Meta's `X-Business-Use-Case-Usage`
 //!   budget header.
@@ -85,8 +88,8 @@
 //!   redacts its token and secret body fields too, so a transport may log a
 //!   whole request.
 //! * Signature comparison is constant time; an empty app secret is refused.
-//! * Media ids, WABA ids, field lists and blocklist numbers are validated before
-//!   they become URL path segments or query values.
+//! * Media ids, WABA ids, wamids, field lists and blocklist numbers are
+//!   validated before they become URL path segments or query values.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
@@ -102,6 +105,7 @@ pub mod error;
 pub mod media;
 pub mod message;
 pub mod retry;
+pub mod status;
 pub mod subscription;
 pub mod template;
 pub mod transport;
@@ -131,6 +135,7 @@ pub use message::{
     UrlType, VideoMessage,
 };
 pub use retry::{Action, Attempt, Repeatability, RetryPolicy};
+pub use status::{validate_wamid, DeliveryStatus, MessageStatus, MAX_WAMID_LEN};
 pub use subscription::{
     SubscribedApp, SubscriptionConfig, SubscriptionState, WebhookSubscriptions,
 };

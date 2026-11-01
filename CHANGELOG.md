@@ -147,6 +147,27 @@ of the README.
   The default ceiling is 100 MiB — exactly `media::MAX_DOCUMENT_BYTES`, so
   `download_media` still works for the largest document the crate accepts — and
   a unit test pins it to `MAX_DOCUMENT_BYTES` so the two cannot drift.
+- Reading the delivery status of a message you sent (issue #12) — the Cloud API
+  *Read a Message* endpoint `GET /{phone-number-id}?id={wamid}`:
+  `WhatsAppClient::message_status` and the new `status` module with
+  `MessageStatus` (`id`, `status`, `timestamp`, `recipient_id`, `errors`) and
+  `DeliveryStatus` (`sent` / `delivered` / `read` / `failed`, anything else as
+  `Unknown(raw)`). Both types are `#[non_exhaustive]` and decode permissively:
+  unknown fields are ignored, missing ones default, and a `status` that is not
+  even a string is carried instead of failing the response.
+- `WhatsAppClient::message_status_url`, `status::validate_wamid` and
+  `status::MAX_WAMID_LEN`: the wamid shape is checked before the request is
+  built, and the id is percent-encoded into the query value.
+- `message_status` is a `GET`, so it is retried on 429 and 5xx like every other
+  read; no sleeping was added to the library.
+- `tests/status.rs` (fixture per status including `failed` with `errors[]`,
+  reordered fields, the accepted/rejected wamid boundary pairs, retry
+  behaviour), four `proptest` properties for the new parsing and validation
+  rules, and `docs/contracts.md` / README sections for the endpoint and its
+  shape.
+- `retry` unit tests for the boundary the curve has to survive: exact doubling
+  from an arbitrary base, a ceiling below the base delay, a zero base delay, and
+  a `u32::MAX` budget that must stay exact and cheap.
 
 ### Changed
 - `transport::Request` and `RequestBody` now redact in `Debug`: the access token
@@ -205,11 +226,6 @@ of the README.
 - README: "Deliberately out of scope" became "Tracked gaps". Every unimplemented
   surface already had an issue (#7, #8, #9), so the section now points at them
   instead of presenting them as decisions.
-
-### Added
-- `retry` unit tests for the boundary the curve has to survive: exact doubling
-  from an arbitrary base, a ceiling below the base delay, a zero base delay, and
-  a `u32::MAX` budget that must stay exact and cheap.
 
 ## [0.1.4] - 2026-10-25
 
