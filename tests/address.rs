@@ -5,10 +5,9 @@ mod common;
 
 use common::{accepted, client, Body, Call};
 use meta_whatsapp::{
-    AddressMessage, AddressReply, AddressValidationError, AddressValues, Error, HeaderText,
-    InteractiveMessage, Message, MessageBody, MessageRequest, SavedAddress, ADDRESS_COUNTRY_LEN,
-    ADDRESS_FIELD_MAX_BYTES, ADDRESS_PIN_CODE_MAX_CHARS,
-    types::FlowReply,
+    types::FlowReply, AddressMessage, AddressReply, AddressValidationError, AddressValues, Error,
+    HeaderText, InteractiveMessage, Message, MessageBody, MessageRequest, SavedAddress,
+    ADDRESS_COUNTRY_LEN, ADDRESS_FIELD_MAX_BYTES, ADDRESS_PIN_CODE_MAX_CHARS,
 };
 use serde_json::{json, Value};
 
