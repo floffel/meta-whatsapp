@@ -3062,6 +3062,24 @@ pub(crate) fn encode_query_value(value: &str) -> String {
     utf8_percent_encode(value, QUERY_VALUE_SET).to_string()
 }
 
+pub(crate) fn percent_encode(value: &str) -> String {
+    use std::fmt::Write as _;
+
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(char::from(byte));
+            }
+            _ => {
+                // Writing into a String cannot fail.
+                let _ = write!(out, "%{byte:02X}");
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3150,22 +3168,4 @@ mod tests {
         header.push_example(TemplateParameter::text("a"));
         assert!(header.validate().is_ok());
     }
-}
-
-pub(crate) fn percent_encode(value: &str) -> String {
-    use std::fmt::Write as _;
-
-    let mut out = String::with_capacity(value.len());
-    for byte in value.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(char::from(byte));
-            }
-            _ => {
-                // Writing into a String cannot fail.
-                let _ = write!(out, "%{byte:02X}");
-            }
-        }
-    }
-    out
 }

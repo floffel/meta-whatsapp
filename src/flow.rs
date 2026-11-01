@@ -26,10 +26,8 @@
 //! assert_eq!(reply.name.as_deref(), Some("flow"));
 //! assert_eq!(reply.response().unwrap().flow_token(), Some("order-42"));
 //! ```
-//! ```
 
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use serde_json::{Map, Value};
+use serde_json::Value;
 
 use crate::error::{Error, Result};
 

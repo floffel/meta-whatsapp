@@ -53,17 +53,28 @@ fuzz_target!(|data: &[u8]| {
         }
     }
     // A flow reply is decoded from a stringified document: the accessors must
-    // stay total whatever that string holds, and the wire object must survive.
-    for reply in payload.flow_replies() {
-        let _ = reply.flow_token.as_deref();
-        let _ = reply.flow_name.as_deref();
-        let _ = reply.screen();
-        let _ = reply.data().map(|data| data.len());
-        let _ = reply.get("screen");
+    // stay total whatever that string holds, and the wire object must survive
+    // a round trip through the typed form.
+    for (_phone_number_id, message) in payload.inbound_messages() {
+        let Some(reply) = message.flow_reply() else {
+            continue;
+        };
+        let _ = reply.name.as_deref();
+        let _ = reply.body.as_deref();
+        let _ = reply.response_json.as_deref();
+        let _ = reply.extra.len();
+        if let Ok(response) = reply.response() {
+            let _ = response.flow_token();
+            let _ = response.field("screen");
+            let _ = response.get("data");
+            let _ = response.as_value().is_object();
+        }
+        let encoded = serde_json::to_value(reply).expect("serialising a reply cannot fail");
+        let decoded: meta_whatsapp::FlowReply =
+            serde_json::from_value(encoded).expect("a serialised reply must decode again");
         assert_eq!(
-            serde_json::to_value(reply).expect("serialising a reply cannot fail"),
-            reply.raw,
-            "a decoded reply must serialise back to the object Meta sent"
+            &decoded, reply,
+            "a decoded reply must survive a round trip"
         );
     }
     for status in payload.statuses() {

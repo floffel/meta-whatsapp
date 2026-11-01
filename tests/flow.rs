@@ -309,4 +309,165 @@ fn empty_ids_and_versions_are_refused() {
 // Inbound
 // ---------------------------------------------------------------------------
 
+#[test]
+fn the_documented_nfm_reply_decodes_its_stringified_response() {
+    let body = reply_body(&json!({
+        "flow_token": "order-42",
+        "screen": "SUMMARY",
+        "data": {"slot": "2026-11-03T09:00", "name": "Ada"}
+    }));
+    let payload = parse(&body);
+    let mut inbound = payload.inbound_messages();
+    let (phone_number_id, message) = inbound.next().expect("one inbound message");
+    assert_eq!(phone_number_id, "106540352242922");
+    assert!(inbound.next().is_none());
 
+    let reply = message.flow_reply().expect("one flow reply");
+    assert_eq!(reply.name.as_deref(), Some("flow"));
+    assert_eq!(reply.body.as_deref(), Some("Sent"));
+    // `response_json` stays the string Meta sent; decoding is explicit.
+    assert!(reply
+        .response_json
+        .as_deref()
+        .is_some_and(|raw| raw.starts_with('{')));
+
+    let response = reply.response().expect("a valid response document");
+    assert_eq!(response.flow_token(), Some("order-42"));
+    assert_eq!(response.field("screen"), Some("SUMMARY"));
+    assert_eq!(response.field("missing"), None);
+    assert_eq!(
+        response.get("data"),
+        Some(&json!({"slot": "2026-11-03T09:00", "name": "Ada"}))
+    );
+    assert_eq!(
+        response
+            .get("data")
+            .and_then(Value::as_object)
+            .map(Map::len),
+        Some(2)
+    );
+}
+
+#[test]
+fn a_response_json_that_is_not_json_is_kept_instead_of_dropped() {
+    let reply: FlowReply = serde_json::from_str(r#"{"name":"flow","response_json":"{broken"}"#)
+        .expect("a reply decodes whatever the string holds");
+    assert_eq!(reply.response_json.as_deref(), Some("{broken"));
+    assert!(
+        reply.response().is_err(),
+        "a broken document must be reported, not silently dropped"
+    );
+}
+
+#[test]
+fn a_reply_without_a_response_document_still_parses() {
+    let reply: FlowReply =
+        serde_json::from_str(r#"{"name":"flow","body":"Sent"}"#).expect("a reply decodes");
+    assert_eq!(reply.response_json, None);
+    assert_eq!(reply.name.as_deref(), Some("flow"));
+    assert!(reply.response().is_err());
+}
+
+#[test]
+fn unknown_keys_survive_and_a_reply_serialises_back_to_its_wire_shape() {
+    let nfm = json!({
+        "name": "flow",
+        "body": "Sent",
+        "response_json": "{\"screen\":\"SUMMARY\"}",
+        "future_key": {"nested": true}
+    });
+    let reply: FlowReply = serde_json::from_value(nfm.clone()).expect("a reply decodes");
+    assert_eq!(
+        reply.extra.get("future_key"),
+        Some(&json!({"nested": true})),
+        "an unmodelled key was dropped"
+    );
+    assert_eq!(
+        serde_json::to_value(&reply).expect("a reply serialises"),
+        nfm,
+        "a parsed webhook must be forwardable unchanged"
+    );
+}
+
+#[test]
+fn a_message_without_a_flow_reply_reports_none() {
+    let body = json!({
+        "object": "whatsapp_business_account",
+        "entry": [{
+            "id": "1",
+            "changes": [{
+                "field": "messages",
+                "value": {
+                    "metadata": {"display_phone_number": "1", "phone_number_id": "2"},
+                    "messages": [
+                        {"id": "m1", "from": "3", "timestamp": "1", "type": "text",
+                         "text": {"body": "Hallo"}},
+                        {"id": "m2", "from": "3", "timestamp": "2", "type": "interactive",
+                         "interactive": {"type": "button_reply",
+                                         "button_reply": {"id": "yes", "title": "Ja"}}}
+                    ]
+                }
+            }]
+        }]
+    })
+    .to_string();
+
+    let payload = parse(&body);
+    let messages: Vec<_> = payload.inbound_messages().collect();
+    assert_eq!(messages.len(), 2);
+    for (_, message) in messages {
+        assert!(message.flow_reply().is_none());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Round trip: the token sent out is the token that comes back.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_flow_round_trips_from_send_to_reply() {
+    let transport = MockTransport::new();
+    let client = client(transport.clone());
+
+    client
+        .send(&MessageRequest::new(
+            "4915112345678",
+            FlowMessage::new("flow-1", "Termin buchen", FlowAction::DataExchange)
+                .flow_token("order-42"),
+        ))
+        .await
+        .expect("the message is accepted");
+
+    let call = transport.only_call();
+    assert_eq!(call.method, Method::Post);
+    assert!(
+        call.url.ends_with("/106540352242922/messages"),
+        "{}",
+        call.url
+    );
+    let sent_token = json_body(&call)["interactive"]["action"]["parameters"]["flow_token"]
+        .as_str()
+        .map(str::to_string);
+    assert_eq!(sent_token.as_deref(), Some("order-42"));
+
+    // The customer finishes the flow; the screen's final payload comes back as
+    // `response_json`, token included.
+    let body = reply_body(&json!({
+        "flow_token": sent_token,
+        "screen": "SUMMARY",
+        "data": {"slot": "2026-11-03T09:00"}
+    }));
+    let payload = parse(&body);
+
+    let reply = payload
+        .inbound_messages()
+        .find_map(|(_, message)| message.flow_reply())
+        .expect("one flow reply");
+    let response = reply.response().expect("a valid response document");
+    assert_eq!(response.flow_token().map(str::to_string), sent_token);
+    assert_eq!(response.field("screen"), Some("SUMMARY"));
+    assert_eq!(
+        response.get("data").and_then(|data| data.get("slot")),
+        Some(&json!("2026-11-03T09:00"))
+    );
+}

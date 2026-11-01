@@ -901,6 +901,54 @@ proptest! {
         }
         prop_assert_eq!(update.validate().is_ok(), with_category || with_body);
     }
+
+    /// A flow reply keeps whatever document arrives as the string Meta sent and
+    /// serialises back to exactly the object it came from; the decoded view
+    /// agrees with the wire document.
+    #[test]
+    fn a_flow_reply_keeps_every_response_document(value in arb_json()) {
+        let rendered = value.to_string();
+        let document: Value = serde_json::from_str(&rendered).unwrap();
+        let nfm = json!({
+            "name": "flow",
+            "body": "Sent",
+            "response_json": rendered,
+        });
+        let reply: FlowReply = serde_json::from_value(nfm.clone()).unwrap();
+
+        prop_assert_eq!(reply.response_json.as_deref(), Some(rendered.as_str()));
+        prop_assert_eq!(serde_json::to_value(&reply).unwrap(), nfm);
+        let response = reply.response().unwrap();
+        prop_assert_eq!(response.as_value(), &document);
+        prop_assert_eq!(
+            response.field("screen"),
+            document.get("screen").and_then(Value::as_str)
+        );
+        prop_assert_eq!(response.get("data"), document.get("data"));
+    }
+
+    /// The flow message accepts exactly the values the documented arithmetic
+    /// allows: CTA up to 30 characters, token up to 1024 bytes, screen id up to
+    /// 64 characters of the identifier alphabet.
+    #[test]
+    fn flow_message_acceptance_matches_the_documented_boundaries(
+        token in ".{0,1100}",
+        cta in ".{0,40}",
+        screen in ".{0,80}",
+    ) {
+        let message = FlowMessage::new("f", cta.clone(), FlowAction::navigate(screen.clone()))
+            .flow_token(token.clone());
+        let accepted = message.validate().is_ok();
+        let expected = !cta.is_empty()
+            && cta.chars().count() <= FLOW_CTA_MAX_CHARS
+            && token.len() <= FLOW_TOKEN_MAX_BYTES
+            && !screen.is_empty()
+            && screen.chars().count() <= FLOW_SCREEN_MAX_CHARS
+            && screen
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-');
+        prop_assert_eq!(accepted, expected, "cta={:?} screen={:?} token_len={}", cta, screen, token.len());
+    }
 }
 
 #[test]
