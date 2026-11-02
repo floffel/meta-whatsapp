@@ -43,6 +43,20 @@ fuzz_target!(|data: &[u8]| {
         let _ = phone_number_id.len();
         let _ = message.media();
         let _ = message.text_body();
+        // The order block is decoded from a member of any shape: the accessors
+        // and the money arithmetic must stay total for all of it.
+        if let Some(order) = message.order() {
+            let _ = order.catalog_id.len();
+            let _ = order.text.as_deref();
+            let _ = order.extra.len();
+            for item in &order.product_items {
+                let _ = item.product_retailer_id.len();
+                let _ = item.quantity;
+                let _ = item.item_price;
+                let _ = item.line_total();
+                let _ = item.extra.len();
+            }
+        }
         let _ = message.timestamp_secs();
         // An address reply is a JSON *string* inside `nfm_reply`: decoding it
         // must be total for any content, and must not lose modelled fields.

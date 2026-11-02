@@ -3,7 +3,8 @@
 
 use std::time::Duration;
 
-use meta_whatsapp::{Error, WebhookPayload, WebhookVerifier};
+use meta_whatsapp::{Error, Order, WebhookPayload, WebhookVerifier};
+use serde_json::{json, Value};
 
 const BODY: &[u8] = br#"{"object":"whatsapp_business_account","entry":[]}"#;
 
@@ -516,4 +517,238 @@ fn verifier_is_clone_and_send_sync() {
     assert_send_sync(&verifier);
     let cloned = verifier.clone();
     assert!(cloned.verify(BODY, &verifier.sign(BODY)).is_ok());
+}
+
+// ---------------------------------------------------------------------------
+// Inbound order block (`type: "order"`)
+// ---------------------------------------------------------------------------
+
+/// A full webhook envelope whose only message is a `type: "order"` message
+/// carrying `order`.
+fn order_payload(order: &Value) -> Value {
+    json!({
+        "object": "whatsapp_business_account",
+        "entry": [{
+            "id": "102290129340398",
+            "changes": [{
+                "field": "messages",
+                "value": {
+                    "messaging_product": "whatsapp",
+                    "metadata": {
+                        "display_phone_number": "15550783881",
+                        "phone_number_id": "106540352242922"
+                    },
+                    "messages": [{
+                        "from": "16505551234",
+                        "id": "wamid.order",
+                        "timestamp": "1739321024",
+                        "type": "order",
+                        "order": order,
+                    }],
+                },
+            }],
+        }],
+    })
+}
+
+/// The typed order block of that envelope, `None` when the message did not
+/// survive parsing at all.
+fn order_block(order: &Value) -> Option<Order> {
+    let payload: WebhookPayload = serde_json::from_value(order_payload(order)).unwrap();
+    let parsed = payload
+        .inbound_messages()
+        .next()
+        .and_then(|(_, message)| message.order().cloned());
+    parsed
+}
+
+#[test]
+fn the_documented_order_example_parses_into_typed_items() {
+    let order = order_block(&json!({
+        "catalog_id": "194836987003835",
+        "text": "Love these!",
+        "product_items": [
+            {"product_retailer_id": "di9ozbzfi4", "quantity": 2, "item_price": 7.99, "currency": "USD"},
+            {"product_retailer_id": "sku-2", "quantity": 1, "item_price": 0.0, "currency": "USD"}
+        ]
+    }))
+    .expect("a well-formed order must parse");
+
+    assert_eq!(order.catalog_id, "194836987003835");
+    assert_eq!(order.text.as_deref(), Some("Love these!"));
+    assert_eq!(order.product_items.len(), 2);
+    let first = &order.product_items[0];
+    assert_eq!(first.product_retailer_id, "di9ozbzfi4");
+    assert_eq!(first.quantity, Some(2));
+    assert_eq!(first.item_price, Some(7.99));
+    assert_eq!(first.currency, "USD");
+    assert_eq!(first.line_total(), Some(15.98));
+    // A free item is a price, not a missing one.
+    assert_eq!(order.product_items[1].item_price, Some(0.0));
+    assert_eq!(order.product_items[1].line_total(), Some(0.0));
+}
+
+#[test]
+fn camel_case_members_and_stringified_numbers_are_accepted() {
+    let order = order_block(&json!({
+        "catalogId": "catalog-1",
+        "productItems": [
+            {"productRetailerId": "sku-1", "quantity": "3", "itemPrice": "2.50", "currency": "EUR"}
+        ]
+    }))
+    .expect("camelCase is the payload spelling too");
+
+    assert_eq!(order.catalog_id, "catalog-1");
+    assert_eq!(order.product_items[0].product_retailer_id, "sku-1");
+    assert_eq!(order.product_items[0].quantity, Some(3));
+    assert_eq!(order.product_items[0].item_price, Some(2.5));
+}
+
+#[test]
+fn an_unreadable_price_is_kept_but_never_becomes_zero() {
+    let unreadable = json!(["NaN", "Infinity", "-1.5", "1e3", " 4.5", "4.5x", "", "-0.01"]);
+    for raw in unreadable.as_array().expect("table").clone() {
+        let order = order_block(&json!({
+            "catalog_id": "c",
+            "product_items": [
+                {"product_retailer_id": "p", "quantity": 2, "item_price": raw, "currency": "EUR"}
+            ]
+        }))
+        .expect("one unreadable price must not remove the order");
+        let item = &order.product_items[0];
+        assert_eq!(item.item_price, None, "price {raw} must not be read");
+        assert_eq!(item.line_total(), None);
+        // No silent zero: the raw member survives where the crate keeps what
+        // it does not model.
+        assert_eq!(item.extra["item_price"], raw, "raw price {raw} was lost");
+    }
+
+    // The same holds for a price sent as an object or an array.
+    let wrongly_typed = json!([{"value": 4.5}, [4.5], true]);
+    for raw in wrongly_typed.as_array().expect("table").clone() {
+        let order = order_block(&json!({
+            "catalog_id": "c",
+            "product_items": [{"product_retailer_id": "p", "item_price": raw}]
+        }))
+        .expect("a wrongly typed price must not remove the order");
+        assert_eq!(order.product_items[0].item_price, None);
+        assert_eq!(order.product_items[0].extra["item_price"], raw);
+    }
+}
+
+#[test]
+fn the_quantity_boundaries_are_pinned() {
+    // Just inside: zero is a quantity this crate reports as sent, and the
+    // largest u32 is readable.
+    for (raw, expected) in json!([[0, 0], [1, 1], [4_294_967_295_u32, 4_294_967_295_u32]])
+        .as_array()
+        .expect("table")
+        .iter()
+        .map(|pair| {
+            let pair = pair.as_array().expect("row");
+            (pair[0].clone(), pair[1].as_u64().expect("expected"))
+        })
+    {
+        let order = order_block(&json!({
+            "catalog_id": "c",
+            "product_items": [{"product_retailer_id": "p", "quantity": raw}]
+        }))
+        .expect("quantity must not remove the order");
+        assert_eq!(
+            order.product_items[0].quantity,
+            u32::try_from(expected).ok(),
+            "quantity {raw}"
+        );
+    }
+
+    // Just outside: 2^32 is not a u32, and a fractional or negative quantity is
+    // not a quantity. Both survive as raw members instead of turning into 0.
+    let outside = json!([4_294_967_296_u64, 2.5, -1, "2x", "", {}]);
+    for raw in outside.as_array().expect("table").clone() {
+        let order = order_block(&json!({
+            "catalog_id": "c",
+            "product_items": [{"product_retailer_id": "p", "quantity": raw}]
+        }))
+        .expect("a bad quantity must not remove the order");
+        assert_eq!(order.product_items[0].quantity, None, "quantity {raw}");
+        assert_eq!(order.product_items[0].extra["quantity"], raw);
+    }
+}
+
+#[test]
+fn missing_members_default_instead_of_failing() {
+    let order = order_block(&json!({"catalog_id": "c"})).expect("an order without items parses");
+    assert!(order.product_items.is_empty());
+    assert_eq!(order.text, None);
+
+    // A member of the wrong shape is kept, not coerced into a value.
+    let order = order_block(&json!({"catalog_id": "c", "text": 5, "product_items": "nope"}))
+        .expect("wrongly typed members do not remove the order");
+    assert_eq!(order.text, None);
+    assert_eq!(order.product_items.len(), 0);
+    assert_eq!(order.extra["text"], 5);
+    assert_eq!(order.extra["product_items"], "nope");
+}
+
+#[test]
+fn a_line_item_that_is_not_an_object_is_skipped() {
+    let order = order_block(&json!({
+        "catalog_id": "c",
+        "product_items": [42, {"product_retailer_id": "p", "quantity": 1}, "x"]
+    }))
+    .expect("the order survives");
+    assert_eq!(order.product_items.len(), 1);
+    assert_eq!(order.product_items[0].product_retailer_id, "p");
+}
+
+#[test]
+fn an_order_that_is_not_an_object_still_parses() {
+    let order = order_block(&json!("unusable")).expect("the message must survive");
+    assert_eq!(order.catalog_id, "");
+    assert!(order.product_items.is_empty());
+    assert_eq!(order.extra["value"], "unusable");
+}
+
+#[test]
+fn unknown_order_members_survive_a_rendering() {
+    let order = order_block(&json!({
+        "catalog_id": "c",
+        "future_order_field": "kept",
+        "product_items": [{
+            "product_retailer_id": "p",
+            "quantity": 1,
+            "item_price": 4.5,
+            "currency": "EUR",
+            "future_item_field": {"deep": true}
+        }]
+    }))
+    .expect("unknown members are not an error");
+
+    assert_eq!(order.extra["future_order_field"], "kept");
+    assert_eq!(
+        order.product_items[0].extra["future_item_field"]["deep"],
+        true
+    );
+
+    let rendered = serde_json::to_value(&order).expect("orders render");
+    assert_eq!(rendered["future_order_field"], "kept");
+    assert_eq!(
+        rendered["product_items"][0]["future_item_field"]["deep"],
+        true
+    );
+    let reparsed: Order = serde_json::from_value(rendered).expect("rendered orders parse");
+    assert_eq!(reparsed, order);
+}
+
+#[test]
+fn a_message_that_is_not_an_order_has_no_order_block() {
+    let body = br#"{"object":"whatsapp_business_account","entry":[{"id":"1","changes":[{
+        "field":"messages","value":{
+            "metadata":{"display_phone_number":"1","phone_number_id":"2"},
+            "messages":[{"id":"wamid.1","from":"3","type":"text","text":{"body":"hi"}}]
+        }
+    }]}]}"#;
+    let payload: WebhookPayload = serde_json::from_slice(body).unwrap();
+    let (_, message) = payload.inbound_messages().next().expect("message");
+    assert!(message.order().is_none());
 }

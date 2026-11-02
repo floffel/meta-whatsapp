@@ -436,27 +436,24 @@ A Cloud API surface this crate does not implement is an issue, not an exclusion.
 The list below is the shortcut; the issue is the contract, and an entry leaves
 this section when its issue closes.
 
-* **Catalog product messages are covered** (`SingleProductMessage`,
-  `MultiProductMessage`, issue #19). What is still open from issue #7 are the
-  **order and address messages** (`interactive.type` `order_details`,
-  `address_message`), which carry their own schema churn; `MessageBody` stays
-  `#[non_exhaustive]` so they can land without a breaking release. The
-  `catalog_message` action (`{name: "catalog_message"}` with a thumbnail product)
-  is not implemented either: it is a catalog-level "view catalog" entry point,
-  not a product card, and belongs to its own issue.
+* **Commerce messages.** Catalog product messages (`SingleProductMessage`,
+  `MultiProductMessage`, issue #19) and address messages (`AddressMessage`,
+  issue #22) are covered, and so is the inbound order a customer places
+  (`type: "order"` → `Message::order()`, `Order`, `OrderItem`). What is still
+  open from issue #7 is the **outbound** order family (`interactive.type`
+  `order_details` and `order_status`): it is payments-gated and has its own
+  regional schema per market, so it is tracked as issue #20.
+  `MessageBody` and `InteractiveMessage` stay `#[non_exhaustive]` so it can
+  land without a breaking release. The `catalog_message` action
+  (`{name: "catalog_message"}` with a thumbnail product) is not implemented
+  either: it is a catalog-level "view catalog" entry point, not a product card,
+  and belongs to its own issue.
 * **Flow API beyond the message pair** — issue #26: asset upload, the
   data-exchange encryption endpoints and the flow preview/get endpoints. The
   message pair itself is complete: outbound `FlowMessage`, and inbound typed
   `FlowReply` whose `response_json` decodes through `FlowReply::response` into
   a `FlowResponse` (`flow_token`, `get`, `field`). Decrypting and serving flows
   stays a server concern, not a client one.
-  `MultiProductMessage`, issue #19) and so are address messages
-  (`AddressMessage`, issue #22). What is still open from issue #7 are the
-  **order messages** (`interactive.type` `order_details`), which carry their own
-  schema churn; `MessageBody` stays `#[non_exhaustive]` so they can land without
-  a breaking release. The `catalog_message` action (`{name: "catalog_message"}`
-  with a thumbnail product) is not implemented either: it is a catalog-level
-  "view catalog" entry point, not a product card, and belongs to its own issue.
 * **Flow data-exchange endpoints** — issue #8. Until then the inbound
   `nfm_reply` payload of a Flow is passed through raw
   (`InteractiveReply::nfm_reply`; address replies do have a typed decoder,

@@ -315,7 +315,7 @@ pub struct Message {
     /// Unix timestamp as string, as sent by Meta.
     #[serde(default)]
     pub timestamp: String,
-    /// `text`, `image`, `audio`, `document`, `button`, `interactive`, ….
+    /// `text`, `image`, `audio`, `document`, `button`, `interactive`, `order`, ….
     #[serde(rename = "type", default)]
     pub message_type: String,
     /// Present when `type == "text"`.
@@ -348,6 +348,9 @@ pub struct Message {
     /// Present when `type == "interactive"` (button/list/flow reply).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interactive: Option<InteractiveReply>,
+    /// Present when `type == "order"`: the catalog order a customer placed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order: Option<Order>,
     /// Present when `type == "button"` (template quick-reply tap).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub button: Option<ButtonReply>,
@@ -420,6 +423,26 @@ impl Message {
             .and_then(|interactive| interactive.nfm_reply.as_ref())
     }
 
+    /// The order a customer placed from a catalog, when this message is one.
+    ///
+    /// ```
+    /// use meta_whatsapp::Message;
+    ///
+    /// let message: Message = serde_json::from_str(
+    ///     r#"{"id":"wamid.1","from":"4915","type":"order","order":{
+    ///         "catalog_id":"194836987003835","text":"Love these!",
+    ///         "product_items":[{"product_retailer_id":"di9ozbzfi4","quantity":2,
+    ///                           "item_price":7.99,"currency":"USD"}]}}"#,
+    /// ).unwrap();
+    /// let order = message.order().unwrap();
+    /// assert_eq!(order.text.as_deref(), Some("Love these!"));
+    /// assert_eq!(order.product_items[0].line_total(), Some(15.98));
+    /// ```
+    #[must_use]
+    pub fn order(&self) -> Option<&Order> {
+        self.order.as_ref()
+    }
+
     /// `timestamp` parsed as unix seconds.
     ///
     /// ```rust
@@ -434,6 +457,258 @@ impl Message {
     pub fn timestamp_secs(&self) -> Option<u64> {
         self.timestamp.trim().parse().ok()
     }
+}
+
+/// The order a customer placed from a catalog (`type: "order"`).
+///
+/// Shape from Meta's *Order messages* webhook reference: `catalog_id`,
+/// optional `text`, and `product_items`. The block is parse-side only — a
+/// business cannot send an order; the outbound order messages (`order_details`,
+/// `order_status`) are interactive and remain an open issue.
+///
+/// Decoding is total, like the rest of the payload: an unreadable member is
+/// kept verbatim in [`Order::extra`] instead of failing the message, so one
+/// malformed field never removes an order from the batch.
+///
+/// ```
+/// use meta_whatsapp::types::Order;
+///
+/// let order: Order = serde_json::from_str(
+///     r#"{"catalog_id":"194836987003835","text":"Two please",
+///         "product_items":[{"product_retailer_id":"sku-1","quantity":2,
+///                           "item_price":4.5,"currency":"EUR"}]}"#,
+/// ).unwrap();
+/// assert_eq!(order.catalog_id, "194836987003835");
+/// assert_eq!(order.product_items[0].product_retailer_id, "sku-1");
+/// ```
+#[derive(Debug, Clone, Default, Serialize, PartialEq)]
+pub struct Order {
+    /// Catalog the ordered products belong to.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub catalog_id: String,
+    /// Free text the customer attached to the order.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    /// Ordered products; empty when absent or not an array.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub product_items: Vec<OrderItem>,
+    /// Members this crate does not model or could not read, kept verbatim.
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+impl<'de> Deserialize<'de> for Order {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = Value::deserialize(deserializer)?;
+        let mut map = match value {
+            Value::Object(map) => map,
+            other => {
+                let mut extra = Map::new();
+                extra.insert("value".to_string(), other);
+                return Ok(Self {
+                    extra,
+                    ..Self::default()
+                });
+            }
+        };
+        let catalog_id = take_string_alias(&mut map, &["catalog_id", "catalogId"]);
+        let text = match map.remove("text") {
+            Some(Value::String(text)) => Some(text),
+            Some(other) => {
+                map.insert("text".to_string(), other);
+                None
+            }
+            None => None,
+        };
+        let product_items = take_items(&mut map, &["product_items", "productItems"]);
+        Ok(Self {
+            catalog_id,
+            text,
+            product_items,
+            extra: map,
+        })
+    }
+}
+
+/// One line item of an inbound order (`order.product_items[]`).
+///
+/// `quantity` and `item_price` are `None` when the payload omits the member or
+/// sends something this crate cannot read as a number, and the raw member is
+/// then kept in [`OrderItem::extra`] — it never becomes a silent zero, because
+/// a wrong price is a wrong invoice line.
+///
+/// ```
+/// use meta_whatsapp::types::OrderItem;
+///
+/// let item: OrderItem = serde_json::from_str(
+///     r#"{"productRetailerId":"sku-1","quantity":"2","itemPrice":"4.5","currency":"EUR"}"#,
+/// ).unwrap();
+/// assert_eq!(item.product_retailer_id, "sku-1");
+/// assert_eq!(item.quantity, Some(2));
+/// assert_eq!(item.item_price, Some(4.5));
+/// assert_eq!(item.line_total(), Some(9.0));
+/// ```
+#[derive(Debug, Clone, Default, Serialize, PartialEq)]
+pub struct OrderItem {
+    /// Catalog product id (`product_retailer_id`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub product_retailer_id: String,
+    /// Units ordered, as an unsigned 32-bit integer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quantity: Option<u32>,
+    /// Price per unit in `currency`, finite and non-negative.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item_price: Option<f64>,
+    /// Currency code as sent (the catalog's, normally ISO 4217).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub currency: String,
+    /// Members this crate does not model or could not read, kept verbatim.
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+impl OrderItem {
+    /// `quantity * item_price`, or `None` when either half is unknown.
+    ///
+    /// ```
+    /// use meta_whatsapp::types::OrderItem;
+    ///
+    /// let item: OrderItem = serde_json::from_str(
+    ///     r#"{"product_retailer_id":"sku-1","quantity":3,"item_price":2.5,"currency":"EUR"}"#,
+    /// ).unwrap();
+    /// assert_eq!(item.line_total(), Some(7.5));
+    ///
+    /// // A quantity without a readable price has no total to report.
+    /// let partial: OrderItem =
+    ///     serde_json::from_str(r#"{"product_retailer_id":"sku-1","quantity":3}"#).unwrap();
+    /// assert_eq!(partial.line_total(), None);
+    /// ```
+    #[must_use]
+    pub fn line_total(&self) -> Option<f64> {
+        let quantity = self.quantity?;
+        let price = self.item_price?;
+        Some(f64::from(quantity) * price)
+    }
+}
+
+impl<'de> Deserialize<'de> for OrderItem {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let mut map = Map::<String, Value>::deserialize(deserializer)?;
+        Ok(Self {
+            product_retailer_id: take_string_alias(
+                &mut map,
+                &["product_retailer_id", "productRetailerId"],
+            ),
+            quantity: take_quantity(&mut map),
+            item_price: take_price(&mut map),
+            currency: take_string_alias(&mut map, &["currency"]),
+            extra: map,
+        })
+    }
+}
+
+/// Removes the first present key and returns its string; a member of another
+/// type stays in `extra` instead of being dropped.
+fn take_string_alias(map: &mut Map<String, Value>, keys: &[&str]) -> String {
+    keys.iter()
+        .find_map(|key| take_string(map, key))
+        .unwrap_or_default()
+}
+
+/// Removes `quantity` and parses it; an unreadable member goes back to `extra`.
+fn take_quantity(map: &mut Map<String, Value>) -> Option<u32> {
+    let value = map.remove("quantity")?;
+    let quantity = parse_quantity(&value);
+    if quantity.is_none() {
+        map.insert("quantity".to_string(), value);
+    }
+    quantity
+}
+
+/// Removes `item_price` (or `itemPrice`) and parses it; an unreadable member
+/// goes back to `extra` under the key it came in on.
+fn take_price(map: &mut Map<String, Value>) -> Option<f64> {
+    let key = ["item_price", "itemPrice"]
+        .into_iter()
+        .find(|key| map.contains_key(*key))?;
+    let value = map.remove(key)?;
+    let price = parse_price(&value);
+    if price.is_none() {
+        map.insert(key.to_string(), value);
+    }
+    price
+}
+
+/// Removes the first present key holding an array and parses every element into
+/// an [`OrderItem`]. Elements that are not objects are dropped, as elsewhere in
+/// this parser; a member that is not an array at all stays in `extra`.
+fn take_items(map: &mut Map<String, Value>, keys: &[&str]) -> Vec<OrderItem> {
+    for key in keys {
+        match map.remove(*key) {
+            Some(Value::Array(items)) => {
+                return items
+                    .into_iter()
+                    .filter_map(|item| serde_json::from_value(item).ok())
+                    .collect()
+            }
+            Some(other) => {
+                map.insert((*key).to_string(), other);
+            }
+            None => {}
+        }
+    }
+    Vec::new()
+}
+
+/// A quantity is an unsigned integer, sent as a JSON number or as a decimal
+/// string. `2.0`, `-1`, `""` and `"2x"` are not quantities.
+fn parse_quantity(value: &Value) -> Option<u32> {
+    match value {
+        Value::Number(number) => number.as_u64().and_then(|raw| u32::try_from(raw).ok()),
+        Value::String(text) => parse_digits(text),
+        _ => None,
+    }
+}
+
+fn parse_digits(text: &str) -> Option<u32> {
+    if text.is_empty() || !text.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    text.parse().ok()
+}
+
+/// A price is a finite, non-negative amount, sent as a JSON number or as a
+/// plain decimal string. `NaN`, `inf`, `-1`, `1e3`, `" 4.5"` and `"4.5x"` are
+/// refused: none of them is a price this crate can carry with confidence.
+fn parse_price(value: &Value) -> Option<f64> {
+    let parsed = match value {
+        Value::Number(number) => number.as_f64()?,
+        Value::String(text) => parse_decimal(text)?,
+        _ => return None,
+    };
+    (parsed.is_finite() && parsed >= 0.0).then_some(parsed)
+}
+
+fn parse_decimal(text: &str) -> Option<f64> {
+    let mut dots = 0;
+    let mut digits = 0;
+    for byte in text.bytes() {
+        match byte {
+            b'0'..=b'9' => digits += 1,
+            b'.' if dots == 0 => dots += 1,
+            _ => return None,
+        }
+    }
+    if digits == 0 {
+        return None;
+    }
+    text.parse().ok()
 }
 
 /// Text body of a text message.

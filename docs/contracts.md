@@ -22,6 +22,12 @@ Secondary sources — the developer reference pages the spec links to:
 * Phone-number registration / deregistration: `https://developers.facebook.com/docs/whatsapp/cloud-api/reference` (the `/{PHONE_NUMBER_ID}/register` and `/{PHONE_NUMBER_ID}/deregister` edges)
 * Two-step verification PIN: `https://developers.facebook.com/docs/whatsapp/cloud-api/reference/two-step-verification`
 * Quality rating background: `https://www.facebook.com/business/help/896873687365001`
+* Order messages (inbound `type = order`):
+  `https://developers.facebook.com/documentation/business-messaging/whatsapp/webhooks/reference/messages/order/`
+  — the `order` object (`catalog_id`, optional `text`, `product_items[]` with
+  `product_retailer_id`, `quantity`, `item_price`, `currency`) and one example
+  payload. The page types `item_price` as *Integer* while its own example sends
+  `7.99`, so the crate reads a finite, non-negative number and refuses the rest.
 * Address messages (India only, `interactive.type = address_message`):
   `https://developers.facebook.com/documentation/business-messaging/whatsapp/messages/address-messages/`
   — field table, the four `action.parameters` members, and both the request and
@@ -71,6 +77,7 @@ Secondary sources — the developer reference pages the spec links to:
 | `RegisterRequest` / `TwoStepVerificationRequest` | register edge, two-step reference | register sends `messaging_product` + `pin` (+ optional `backup`); two-step sends `pin` alone. |
 | `WebhookSubscriptions` / `SubscribedApp` | `SubscribedAppsResponse`, `SubscribedApp` | Each entry may wrap the app in `whatsapp_business_api_data` (spec example) — both parse. |
 | `SubscriptionConfig` | `SubscriptionRequest` | `override_callback_uri`, `verify_token`. |
+| `Order` / `OrderItem` | not in the v23 OpenAPI file — parse-side only, from the *Order messages* webhook reference | Inbound `type: "order"` message. `catalog_id` string, optional `text`, `product_items[]` with `product_retailer_id`, `quantity`, `item_price`, `currency`. The reference publishes no maximum for the array, the quantity or the price, so none is capped; `quantity` is a `u32` (number or decimal string) and `item_price` a finite, non-negative number, and a member that is neither stays verbatim in `extra` instead of becoming a zero. Outbound order messages (`order_details`, `order_status`) are interactive and not implemented — issue #20. |
 | `AddressMessage` / `AddressValues` / `SavedAddress` / `AddressValidationError` | `interactive` with `type` and `action.name` = `address_message` | Values in the guide's field table; `in_pin_code` max 6 characters is the only per-field limit it publishes. `country` is required (ISO 3166-1 alpha-2) and is an action parameter, not a value. `validation_errors` is a field → message object. The number of `saved_addresses` is not bounded — see *unverified*, README. |
 | `AddressReply` | `interactive.nfm_reply.response_json` (a JSON string) | `{"saved_address_id": …, "values": {…}}` from the guide's submission example; unknown keys stay in `extra`. |
 | `BusinessUseCaseUsage` / `UseCaseUsage` | header `x-business-use-case-usage` | Header value is a JSON object keyed by business id, each value an array of `{type, call_count, total_cputime, total_time, estimated_time_to_regain_access}`. |
@@ -106,6 +113,12 @@ Secondary sources — the developer reference pages the spec links to:
   shape for `status`: a string is parsed, `null` becomes the default unknown,
   anything else is kept as its raw JSON text. Failing the whole response on one
   unexpected field value would hide the delivery state the caller asked for.
+* **Commerce numbers are read permissively, never guessed.** An inbound order
+  `quantity` or `item_price` is accepted as a JSON number or as a plain decimal
+  string; a member that is neither (a `NaN`, a negative price, an object) stays
+  verbatim in the item's `extra` and the field stays empty, so an unreadable
+  price never turns into a zero. Unknown keys survive in the matching `extra`
+  map, including through a render/parse round trip.
 * **No field-level webhook subscription.** The WABA node has no
   `subscribed_fields`; that parameter belongs to the app-level
   `/{app_id}/subscriptions` endpoint, which is out of scope (README).

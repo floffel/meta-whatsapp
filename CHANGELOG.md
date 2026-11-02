@@ -10,6 +10,22 @@ of the README.
 ## [Unreleased]
 
 ### Added
+- Inbound order messages (#20, rescued from #17). A catalog order a customer
+  places arrives as `type: "order"` carrying an `order` block, which used to
+  land in `Message::extra` and nowhere else. `Message::order()` now returns a
+  typed `Order` (`catalog_id`, optional `text`, `product_items`), and each
+  `OrderItem` exposes the product id, `quantity`, `item_price`, `currency` and a
+  `line_total()`. Decoding is total, like the rest of the payload: both numbers
+  are accepted as JSON numbers or as plain decimal strings, and a member that is
+  neither — `"NaN"`, `-1.5`, `1e3`, an object — stays verbatim in the item's
+  `extra` while the field stays empty, so an unreadable price never becomes a
+  free line and never drops the message from the batch. The outbound
+  `order_details` / `order_status` family stays open in #20. Tests: Meta's
+  documented example payload, camelCase and stringified members, the quantity
+  and price boundaries (`0`/`1`/`u32::MAX` and `u32::MAX + 1`, `0.0`/`0.01`,
+  `NaN`, `Infinity`, negative, exponent, trailing garbage), unknown members
+  surviving a render/parse round trip, a proptest over arbitrary `order`
+  members, and a fuzz corpus entry.
 - Multi-tenant routing of delivery statuses (#42):
   `WebhookPayload::statuses_with_phone_number_id()` yields
   `(&str, &Status)` — the sibling of `inbound_messages()` that the plain

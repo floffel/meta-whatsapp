@@ -28,11 +28,11 @@ use meta_whatsapp::{
     AddressMessage, AudioMessage, ButtonMessage, ContactCard, ContactName, ContactOrg,
     ContactsMessage, DocumentMessage, EmailType, Error, FlowAction, FlowMessage, FlowMode,
     HeaderText, ImageMessage, InteractiveMessage, ListMessage, ListRow, ListSection,
-    LocationMessage, MediaBytes as ReexportedMediaBytes, MessageBody, MultiProductMessage,
-    PhoneType, ProductItem, ProductSection, ReactionMessage, RecipientType, RegisterRequest,
-    RegistrationBackup, ReplyButton, SingleProductMessage, StickerMessage, SuccessOutcome,
-    TemplateMessage, TextMessage, TwoStepVerificationRequest, UrlType, VerificationPin,
-    VideoMessage, VERIFICATION_PIN_LEN,
+    LocationMessage, MediaBytes as ReexportedMediaBytes, Message, MessageBody, MultiProductMessage,
+    Order, OrderItem, PhoneType, ProductItem, ProductSection, ReactionMessage, RecipientType,
+    RegisterRequest, RegistrationBackup, ReplyButton, SingleProductMessage, StickerMessage,
+    SuccessOutcome, TemplateMessage, TextMessage, TwoStepVerificationRequest, UrlType,
+    VerificationPin, VideoMessage, VERIFICATION_PIN_LEN,
 };
 
 #[test]
@@ -930,4 +930,37 @@ async fn the_lifecycle_calls_each_send_exactly_once() {
         client.two_step_verification_url(),
         client.phone_number_url()
     );
+}
+
+/// The inbound order block is reachable from the crate root and from `types`,
+/// and it carries Meta's documented members plus whatever else arrived.
+#[test]
+fn the_order_block_is_typed_from_the_crate_root() {
+    let message: Message = serde_json::from_str(
+        r#"{"id":"wamid.1","from":"4915","type":"order","order":{
+            "catalog_id":"194836987003835","text":"Grüße",
+            "product_items":[{"product_retailer_id":"di9ozbzfi4","quantity":3,
+                              "item_price":0.01,"currency":"USD","future":"kept"}],
+            "future_order":"kept"}}"#,
+    )
+    .unwrap();
+
+    let order: &Order = message.order().expect("an order block");
+    assert_eq!(order.catalog_id, "194836987003835");
+    assert_eq!(order.text.as_deref(), Some("Grüße"));
+    assert_eq!(order.extra["future_order"], "kept");
+
+    let item: &OrderItem = &order.product_items[0];
+    assert_eq!(item.quantity, Some(3));
+    assert_eq!(item.item_price, Some(0.01));
+    assert_eq!(item.currency, "USD");
+    assert_eq!(item.extra["future"], "kept");
+    assert!(item.line_total().unwrap_or_default() > 0.0);
+
+    // The same type through its module path, and the default is empty.
+    let direct: meta_whatsapp::types::Order =
+        serde_json::from_str(r#"{"catalog_id":"c"}"#).unwrap();
+    assert!(direct.product_items.is_empty());
+    assert_eq!(Order::default().extra.len(), 0);
+    assert_eq!(OrderItem::default().line_total(), None);
 }

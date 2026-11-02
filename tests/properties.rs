@@ -22,9 +22,9 @@ use meta_whatsapp::transport::Method;
 use meta_whatsapp::usage::BusinessUseCaseUsage;
 use meta_whatsapp::{
     AddressMessage, AddressReply, AddressValues, Error, FlowAction, FlowMessage, FlowReply,
-    MessageRequest, MultiProductMessage, ProductSection, RetryPolicy, SingleProductMessage,
-    TemplateCategory, TemplateDefinition, TemplateQuery, TemplateUpdate, TextMessage,
-    WebhookPayload, WebhookVerifier, ADDRESS_FIELD_MAX_BYTES,
+    Message, MessageRequest, MultiProductMessage, OrderItem, ProductSection, RetryPolicy,
+    SingleProductMessage, TemplateCategory, TemplateDefinition, TemplateQuery, TemplateUpdate,
+    TextMessage, WebhookPayload, WebhookVerifier, ADDRESS_FIELD_MAX_BYTES,
 };
 use percent_encoding::percent_decode_str;
 use proptest::prelude::*;
@@ -1152,5 +1152,76 @@ proptest! {
         let encoded = serde_json::to_string(&reply)?;
         let decoded = AddressReply::parse(&encoded)?;
         prop_assert_eq!(decoded, reply);
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(96))]
+
+    /// A line total is exactly the product of the two halves that were parsed
+    /// off the wire, for every quantity and price the wire can carry.
+    #[test]
+    fn a_line_total_is_the_product_of_its_parts(
+        quantity in 0_u32..=100_000,
+        price in 0.0_f64..=1_000_000.0,
+    ) {
+        let item: OrderItem = serde_json::from_value(json!({
+            "product_retailer_id": "sku-1",
+            "quantity": quantity,
+            "item_price": price,
+            "currency": "EUR",
+        }))?;
+        prop_assert_eq!(item.quantity, Some(quantity));
+        prop_assert_eq!(item.item_price, Some(price));
+        prop_assert_eq!(item.line_total(), Some(f64::from(quantity) * price));
+    }
+
+    /// The total is monotone in quantity: more units at the same price is never
+    /// less money.
+    #[test]
+    fn a_line_total_never_falls_when_quantity_grows(
+        lower in 0_u32..=100_000,
+        extra in 0_u32..=100_000,
+        price in 0.0_f64..=1_000_000.0,
+    ) {
+        let item = |quantity: u32| OrderItem {
+            product_retailer_id: "sku-1".to_string(),
+            quantity: Some(quantity),
+            item_price: Some(price),
+            currency: "EUR".to_string(),
+            ..OrderItem::default()
+        };
+        let (small, large) = (item(lower), item(lower + extra));
+        let (small_total, large_total) = (
+            small.line_total().ok_or_else(|| TestCaseError::fail("a total is expected"))?,
+            large.line_total().ok_or_else(|| TestCaseError::fail("a total is expected"))?,
+        );
+        prop_assert!(large_total >= small_total);
+    }
+
+    /// Whatever the `order` member holds, decoding it is total: the message
+    /// keeps a block, and the block survives a render/parse round trip. This is
+    /// the property `ChangeValue::from_value` relies on when it drops a
+    /// message that fails to parse.
+    #[test]
+    fn any_order_member_decodes_and_round_trips(block in arb_json()) {
+        let mut message: Message = serde_json::from_value(json!({
+            "id": "wamid.1",
+            "from": "4915",
+            "type": "order",
+            "timestamp": "1739321024",
+            "order": block,
+        }))?;
+        // `null` is the one member serde reads as "absent", not as a block.
+        if block.is_null() {
+            prop_assert!(message.order().is_none());
+            return Ok(());
+        }
+        let order = message.order().ok_or_else(|| TestCaseError::fail("an order block is expected"))?.clone();
+        let rendered = serde_json::to_value(&order)?;
+        let reparsed: meta_whatsapp::Order = serde_json::from_value(rendered)?;
+        prop_assert_eq!(reparsed, order);
+        message.order = None;
+        prop_assert!(message.order().is_none());
     }
 }

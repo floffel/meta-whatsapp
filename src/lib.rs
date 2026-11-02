@@ -155,7 +155,8 @@ pub use template::{
 pub use transport::ReqwestTransport;
 pub use transport::Transport;
 pub use types::{
-    Change, ChangeValue, Entry, FlowReply, FlowResponse, Message, Status, WebhookPayload,
+    Change, ChangeValue, Entry, FlowReply, FlowResponse, Message, Order, OrderItem, Status,
+    WebhookPayload,
 };
 pub use usage::{BusinessUseCaseUsage, UseCaseUsage};
 pub use webhook::WebhookVerifier;
