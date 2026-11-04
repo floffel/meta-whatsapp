@@ -10,6 +10,19 @@ of the README.
 ## [Unreleased]
 
 ### Added
+- The catalog entry point (follow-up to #19): `CatalogMessage` renders
+  `interactive.type = "catalog_message"` — the "view catalog" action carrying
+  `thumbnail_product_retailer_id`, the required body (1024 bytes) and an
+  optional footer (60 characters) — with a recording-transport test pinning the
+  exact JSON and a boundary pair on both limits. The inbound `Order` /
+  `OrderItem` pair gained builders (`Order::new`, `Order::item`, `Order::text`,
+  `OrderItem::new`) and `validate` for an application that has to hand a parsed
+  order on: at least one line, `quantity >= 1`, a finite non-negative
+  `item_price`, a three-letter ISO-4217 currency. The item count and the order
+  `text` stay uncapped, because Meta publishes no ceiling for either and its
+  own example payload sends `"text": ""`. Tests: the documented JSON, both
+  limits with a boundary pair each (bytes vs. characters, unicode), and the
+  empty and control-character ids.
 - Inbound order messages (#20, rescued from #17). A catalog order a customer
   places arrives as `type: "order"` carrying an `order` block, which used to
   land in `Message::extra` and nowhere else. `Message::order()` now returns a

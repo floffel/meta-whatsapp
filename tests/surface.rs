@@ -25,9 +25,9 @@ use meta_whatsapp::template::{
 };
 use meta_whatsapp::usage::{BusinessUseCaseUsage, UseCaseUsage};
 use meta_whatsapp::{
-    AddressMessage, AudioMessage, ButtonMessage, ContactCard, ContactName, ContactOrg,
-    ContactsMessage, DocumentMessage, EmailType, Error, FlowAction, FlowMessage, FlowMode,
-    HeaderText, ImageMessage, InteractiveMessage, ListMessage, ListRow, ListSection,
+    AddressMessage, AudioMessage, ButtonMessage, CatalogMessage, ContactCard, ContactName,
+    ContactOrg, ContactsMessage, DocumentMessage, EmailType, Error, FlowAction, FlowMessage,
+    FlowMode, HeaderText, ImageMessage, InteractiveMessage, ListMessage, ListRow, ListSection,
     LocationMessage, MediaBytes as ReexportedMediaBytes, Message, MessageBody, MultiProductMessage,
     Order, OrderItem, PhoneType, ProductItem, ProductSection, ReactionMessage, RecipientType,
     RegisterRequest, RegistrationBackup, ReplyButton, SingleProductMessage, StickerMessage,
@@ -73,6 +73,10 @@ fn every_body_reports_its_wire_type() {
                     .section(ProductSection::from_ids(["sku"])),
             )
             .into(),
+            "interactive",
+        ),
+        (
+            CatalogMessage::new("sku-thumb", "Browse").into(),
             "interactive",
         ),
         (TemplateMessage::new("t", "de").into(), "template"),

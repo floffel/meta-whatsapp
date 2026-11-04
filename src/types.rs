@@ -28,6 +28,9 @@
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
 
+use crate::error::Error;
+use crate::message::{require_no_controls, require_non_empty};
+
 /// Top level webhook envelope.
 ///
 /// ```
@@ -487,6 +490,9 @@ pub struct Order {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub catalog_id: String,
     /// Free text the customer attached to the order.
+    ///
+    /// An empty string is a normal value, not a defect: Meta's own example
+    /// payload sends `"text": ""`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
     /// Ordered products; empty when absent or not an array.
@@ -533,6 +539,93 @@ impl<'de> Deserialize<'de> for Order {
     }
 }
 
+impl Order {
+    /// An order for `product_items` from `catalog_id`.
+    ///
+    /// ```rust
+    /// use meta_whatsapp::{Order, OrderItem};
+    ///
+    /// let order = Order::new("catalog-1", vec![OrderItem::new("sku-1", 1, 4.0, "EUR")]);
+    /// assert_eq!(order.catalog_id, "catalog-1");
+    /// assert!(order.validate().is_ok());
+    /// ```
+    #[must_use]
+    pub fn new(catalog_id: impl Into<String>, product_items: Vec<OrderItem>) -> Self {
+        Self {
+            catalog_id: catalog_id.into(),
+            text: None,
+            product_items,
+            extra: Map::new(),
+        }
+    }
+
+    /// Sets the free text the customer attached to the order.
+    ///
+    /// ```rust
+    /// use meta_whatsapp::{Order, OrderItem};
+    ///
+    /// let order = Order::new("c", vec![OrderItem::new("p", 1, 1.0, "USD")]).text("Two please");
+    /// assert_eq!(order.text.as_deref(), Some("Two please"));
+    /// ```
+    #[must_use]
+    pub fn text(mut self, text: impl Into<String>) -> Self {
+        self.text = Some(text.into());
+        self
+    }
+
+    /// Appends a line item.
+    ///
+    /// ```rust
+    /// use meta_whatsapp::{Order, OrderItem};
+    ///
+    /// let order = Order::new("c", Vec::new()).item(OrderItem::new("p", 1, 1.0, "USD"));
+    /// assert_eq!(order.product_items.len(), 1);
+    /// ```
+    #[must_use]
+    pub fn item(mut self, item: OrderItem) -> Self {
+        self.product_items.push(item);
+        self
+    }
+
+    /// Checks the catalog id, the item list and every line item.
+    ///
+    /// This is the check an application runs on an order it parsed out of a
+    /// webhook before it echoes the order back, invoices it or stores it: the
+    /// parser accepts anything, `validate` says whether the order is usable.
+    ///
+    /// Meta publishes no upper bound for `product_items` and none for `text`
+    /// (its own example sends `text: ""`), so neither is capped here — a
+    /// ceiling of this crate's own invention would refuse orders the provider
+    /// happily delivers.
+    ///
+    /// ```rust
+    /// use meta_whatsapp::{Order, OrderItem};
+    ///
+    /// let order = Order::new("catalog-1", vec![OrderItem::new("sku-1", 1, 4.0, "EUR")]);
+    /// assert!(order.validate().is_ok());
+    /// assert!(Order::new("catalog-1", Vec::new()).validate().is_err());
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an empty or unprintable catalog id, an empty
+    /// item list, or an invalid line item.
+    pub fn validate(&self) -> crate::error::Result<()> {
+        require_non_empty("order.catalog_id", &self.catalog_id)?;
+        require_no_controls("order.catalog_id", &self.catalog_id)?;
+        if self.product_items.is_empty() {
+            return Err(Error::validation(
+                "order.product_items",
+                "must contain at least one item",
+            ));
+        }
+        for item in &self.product_items {
+            item.validate()?;
+        }
+        Ok(())
+    }
+}
+
 /// One line item of an inbound order (`order.product_items[]`).
 ///
 /// `quantity` and `item_price` are `None` when the payload omits the member or
@@ -571,6 +664,106 @@ pub struct OrderItem {
 }
 
 impl OrderItem {
+    /// A line item with every field Meta's order payload carries.
+    ///
+    /// The builder is the mirror image of the parser: it sets `quantity` and
+    /// `item_price` to `Some`, so an item built by hand passes
+    /// [`OrderItem::validate`] whenever the values themselves are valid.
+    ///
+    /// ```rust
+    /// use meta_whatsapp::OrderItem;
+    ///
+    /// let item = OrderItem::new("sku-1", 2, 4.5, "EUR");
+    /// assert_eq!(item.quantity, Some(2));
+    /// assert_eq!(item.item_price, Some(4.5));
+    /// assert!(item.validate().is_ok());
+    /// ```
+    #[must_use]
+    pub fn new(
+        product_retailer_id: impl Into<String>,
+        quantity: u32,
+        item_price: f64,
+        currency: impl Into<String>,
+    ) -> Self {
+        Self {
+            product_retailer_id: product_retailer_id.into(),
+            quantity: Some(quantity),
+            item_price: Some(item_price),
+            currency: currency.into(),
+            extra: Map::new(),
+        }
+    }
+
+    /// Checks the product id, the unit count, the price and the currency.
+    ///
+    /// Use it on the parse side too: the parser is deliberately total, so a
+    /// quantity or price it could not read stays `None` here instead of
+    /// failing the webhook — an order that is then rejected by `validate` is
+    /// visible, while a silently dropped message would not be.
+    ///
+    /// ```rust
+    /// use meta_whatsapp::OrderItem;
+    ///
+    /// assert!(OrderItem::new("sku-1", 1, 0.0, "EUR").validate().is_ok());
+    /// assert!(OrderItem::new("sku-1", 0, 1.0, "EUR").validate().is_err());
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] naming the first offending field: an empty or
+    /// unprintable id, a quantity of zero, a negative or non-finite price, a
+    /// currency that is not three uppercase ASCII letters, or an order member
+    /// the parser could not read at all (`quantity`/`item_price` are `None`).
+    pub fn validate(&self) -> crate::error::Result<()> {
+        require_non_empty(
+            "order.product_items.product_retailer_id",
+            &self.product_retailer_id,
+        )?;
+        // No length rule: neither the spec nor the reference caps a retailer id.
+        require_no_controls(
+            "order.product_items.product_retailer_id",
+            &self.product_retailer_id,
+        )?;
+        match self.quantity {
+            Some(0) => {
+                return Err(Error::validation(
+                    "order.product_items.quantity",
+                    "must be at least 1",
+                ))
+            }
+            Some(_) => {}
+            None => {
+                return Err(Error::validation(
+                    "order.product_items.quantity",
+                    "is missing or not an unsigned integer",
+                ))
+            }
+        }
+        match self.item_price {
+            Some(price) if price.is_finite() && price >= 0.0 => {}
+            Some(_) => {
+                return Err(Error::validation(
+                    "order.product_items.item_price",
+                    "must be finite and at least 0",
+                ))
+            }
+            None => {
+                return Err(Error::validation(
+                    "order.product_items.item_price",
+                    "is missing or not a readable price",
+                ))
+            }
+        }
+        if self.currency.len() != 3 || !self.currency.bytes().all(|byte| byte.is_ascii_uppercase())
+        {
+            return Err(Error::validation(
+                "order.product_items.currency",
+                "must be a three-letter uppercase ISO 4217 code",
+            ));
+        }
+        Ok(())
+    }
+
     /// `quantity * item_price`, or `None` when either half is unknown.
     ///
     /// ```

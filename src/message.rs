@@ -3040,14 +3040,136 @@ impl From<SingleProductMessage> for MessageBody {
     }
 }
 
+/// Catalog-entry message (`interactive.type = "catalog_message"`): the "view
+/// catalog" button with a product thumbnail.
+///
+/// This is not a product card — [`SingleProductMessage`] shows one product,
+/// [`MultiProductMessage`] a selectable list. Here the customer opens the whole
+/// catalog, so the required fields are the body line and the thumbnail product;
+/// the footer is optional.
+///
+/// ```rust
+/// use meta_whatsapp::{CatalogMessage, MessageRequest};
+///
+/// let json = MessageRequest::new(
+///     "1",
+///     CatalogMessage::new("sku-thumb", "Ordering is easy: open our catalog."),
+/// )
+/// .to_json()?;
+/// assert_eq!(json["type"], "interactive");
+/// assert_eq!(json["interactive"]["type"], "catalog_message");
+/// assert_eq!(json["interactive"]["action"]["name"], "catalog_message");
+/// assert_eq!(
+///     json["interactive"]["action"]["parameters"]["thumbnail_product_retailer_id"],
+///     "sku-thumb"
+/// );
+/// # Ok::<(), meta_whatsapp::Error>(())
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CatalogMessage {
+    /// Retailer id of the product whose image becomes the header thumbnail.
+    pub thumbnail_product_retailer_id: String,
+    /// Body line, at most [`CAPTION_MAX_BYTES`] bytes.
+    pub body: String,
+    /// Optional footer, at most [`HEADER_MAX_CHARS`] characters.
+    pub footer: Option<String>,
+}
+
+impl CatalogMessage {
+    /// A catalog message with its body and thumbnail product.
+    ///
+    /// The body is not optional: the spec's `BodyObject` marks it required for
+    /// every interactive type except `product`.
+    ///
+    /// ```rust
+    /// use meta_whatsapp::CatalogMessage;
+    ///
+    /// let message = CatalogMessage::new("sku-thumb", "Browse our catalog");
+    /// assert_eq!(message.thumbnail_product_retailer_id, "sku-thumb");
+    /// assert_eq!(message.body, "Browse our catalog");
+    /// assert!(message.footer.is_none());
+    /// ```
+    pub fn new(thumbnail_product_retailer_id: impl Into<String>, body: impl Into<String>) -> Self {
+        Self {
+            thumbnail_product_retailer_id: thumbnail_product_retailer_id.into(),
+            body: body.into(),
+            footer: None,
+        }
+    }
+
+    /// Adds a footer.
+    ///
+    /// ```rust
+    /// use meta_whatsapp::CatalogMessage;
+    ///
+    /// let message = CatalogMessage::new("sku", "Browse").footer("Impressum");
+    /// assert_eq!(message.footer.as_deref(), Some("Impressum"));
+    /// ```
+    #[must_use]
+    pub fn footer(mut self, footer: impl Into<String>) -> Self {
+        self.footer = Some(footer.into());
+        self
+    }
+
+    /// Checks the thumbnail id and the text bounds.
+    ///
+    /// ```rust
+    /// use meta_whatsapp::CatalogMessage;
+    ///
+    /// assert!(CatalogMessage::new("sku-thumb", "Browse").validate().is_ok());
+    /// assert!(CatalogMessage::new("", "Browse").validate().is_err());
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] naming the first offending field.
+    pub fn validate(&self) -> Result<()> {
+        require_identifier(
+            "interactive.action.parameters.thumbnail_product_retailer_id",
+            &self.thumbnail_product_retailer_id,
+        )?;
+        require_non_empty("interactive.body.text", &self.body)?;
+        require_max_bytes("interactive.body.text", &self.body, CAPTION_MAX_BYTES)?;
+        if let Some(footer) = &self.footer {
+            require_max_chars("interactive.footer.text", footer, HEADER_MAX_CHARS)?;
+        }
+        Ok(())
+    }
+
+    fn render(&self) -> Value {
+        let mut interactive = Map::new();
+        interactive.insert("type".into(), Value::String("catalog_message".into()));
+        interactive.insert("body".into(), json!({ "text": self.body }));
+        if let Some(footer) = &self.footer {
+            interactive.insert("footer".into(), json!({ "text": footer }));
+        }
+        interactive.insert(
+            "action".into(),
+            json!({
+                "name": "catalog_message",
+                "parameters": {
+                    "thumbnail_product_retailer_id": self.thumbnail_product_retailer_id,
+                },
+            }),
+        );
+        Value::Object(interactive)
+    }
+}
+
 impl From<MultiProductMessage> for MessageBody {
     fn from(value: MultiProductMessage) -> Self {
         Self::Interactive(InteractiveMessage::ProductList(value))
     }
 }
 
-/// Any interactive message: buttons, list, flow, an address form or a catalog
-/// product message.
+impl From<CatalogMessage> for MessageBody {
+    fn from(value: CatalogMessage) -> Self {
+        Self::Interactive(InteractiveMessage::Catalog(value))
+    }
+}
+
+/// Any interactive message: buttons, list, flow, an address form, a catalog
+/// product message or the catalog entry point.
 ///
 /// ```
 /// use meta_whatsapp::{InteractiveMessage, ListMessage, MessageRequest};
@@ -3072,11 +3194,13 @@ pub enum InteractiveMessage {
     Product(SingleProductMessage),
     /// Up to 30 catalog products in up to 10 sections.
     ProductList(MultiProductMessage),
+    /// The "view catalog" entry point with a product thumbnail.
+    Catalog(CatalogMessage),
 }
 
 impl InteractiveMessage {
     /// Which interactive kind this is (`button`, `list`, `flow`,
-    /// `address_message`, `product`, `product_list`).
+    /// `address_message`, `product`, `product_list`, `catalog_message`).
     ///
     /// ```
     /// use meta_whatsapp::{FlowAction, FlowMessage, InteractiveMessage};
@@ -3100,6 +3224,7 @@ impl InteractiveMessage {
             Self::Address(_) => "address_message",
             Self::Product(_) => "product",
             Self::ProductList(_) => "product_list",
+            Self::Catalog(_) => "catalog_message",
         }
     }
 
@@ -3126,6 +3251,7 @@ impl InteractiveMessage {
             Self::Address(message) => message.validate(),
             Self::Product(message) => message.validate(),
             Self::ProductList(message) => message.validate(),
+            Self::Catalog(message) => message.validate(),
         }
     }
 
@@ -3137,6 +3263,7 @@ impl InteractiveMessage {
             Self::Address(message) => message.render(),
             Self::Product(message) => message.render(),
             Self::ProductList(message) => message.render(),
+            Self::Catalog(message) => message.render(),
         }
     }
 }
@@ -3174,6 +3301,12 @@ impl From<SingleProductMessage> for InteractiveMessage {
 impl From<MultiProductMessage> for InteractiveMessage {
     fn from(value: MultiProductMessage) -> Self {
         Self::ProductList(value)
+    }
+}
+
+impl From<CatalogMessage> for InteractiveMessage {
+    fn from(value: CatalogMessage) -> Self {
+        Self::Catalog(value)
     }
 }
 

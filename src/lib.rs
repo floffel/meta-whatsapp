@@ -132,12 +132,12 @@ pub use flow::{
 };
 pub use media::{MediaBytes, MediaInfo, MediaRef, MediaUpload};
 pub use message::{
-    AudioMessage, ButtonMessage, ContactCard, ContactEmail, ContactName, ContactOrg, ContactPhone,
-    ContactsMessage, DocumentMessage, EmailType, FlowAction, FlowMessage, FlowMode, HeaderText,
-    ImageMessage, InteractiveMessage, ListMessage, ListRow, ListSection, LocationMessage,
-    MessageBody, MessageRequest, MultiProductMessage, PhoneType, ProductItem, ProductSection,
-    ReactionMessage, RecipientType, ReplyButton, SingleProductMessage, StickerMessage, TextMessage,
-    UrlType, VideoMessage,
+    AudioMessage, ButtonMessage, CatalogMessage, ContactCard, ContactEmail, ContactName,
+    ContactOrg, ContactPhone, ContactsMessage, DocumentMessage, EmailType, FlowAction, FlowMessage,
+    FlowMode, HeaderText, ImageMessage, InteractiveMessage, ListMessage, ListRow, ListSection,
+    LocationMessage, MessageBody, MessageRequest, MultiProductMessage, PhoneType, ProductItem,
+    ProductSection, ReactionMessage, RecipientType, ReplyButton, SingleProductMessage,
+    StickerMessage, TextMessage, UrlType, VideoMessage,
 };
 pub use retry::{Action, Attempt, Repeatability, RetryPolicy};
 pub use status::{validate_wamid, DeliveryStatus, MessageStatus, MAX_WAMID_LEN};
