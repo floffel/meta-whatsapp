@@ -122,6 +122,7 @@ validates before rendering, so an invalid message never reaches the network.
 | reaction | `ReactionMessage` | empty emoji removes a reaction |
 | interactive | `ButtonMessage`, `ListMessage`, `FlowMessage`, `AddressMessage` | 1–3 buttons, 1–10 list rows, flows, address forms |
 | catalog products | `SingleProductMessage`, `MultiProductMessage` + `ProductSection` | one product card, or up to 30 products in up to 10 sections |
+| catalog entry | `CatalogMessage` | `catalog_message` action: thumbnail product + body (≤1024 bytes), optional footer, opens the whole catalog |
 | template | `TemplateMessage` | text/currency/date-time/media parameters, header/body/button merges |
 
 Envelope-level features: reply context (`context.message_id`),
@@ -444,10 +445,15 @@ this section when its issue closes.
   `order_details` and `order_status`): it is payments-gated and has its own
   regional schema per market, so it is tracked as issue #20.
   `MessageBody` and `InteractiveMessage` stay `#[non_exhaustive]` so it can
-  land without a breaking release. The `catalog_message` action
-  (`{name: "catalog_message"}` with a thumbnail product) is not implemented
-  either: it is a catalog-level "view catalog" entry point, not a product card,
-  and belongs to its own issue.
+  land without a breaking release. The catalog entry point is covered:
+  `CatalogMessage` renders the `catalog_message` action with its thumbnail
+  product and its body (the spec makes the body required for every interactive
+  type but `product`), and the inbound `Order`/`OrderItem` pair gained builders
+  (`Order::new`, `OrderItem::new`) plus `validate`, so an application can check
+  a parsed order — at least one line, quantity ≥ 1, finite non-negative price,
+  three-letter ISO currency — before it invoices or forwards it. The item count
+  and the order `text` are deliberately uncapped: Meta publishes no ceiling for
+  either, and its own example sends `"text": ""`.
 * **Flow API beyond the message pair** — issue #26: asset upload, the
   data-exchange encryption endpoints and the flow preview/get endpoints. The
   message pair itself is complete: outbound `FlowMessage`, and inbound typed
@@ -496,24 +502,24 @@ The suite has five layers:
   the retry class of each verb and both sides of every template limit;
   `tests/address.rs` covers the address form's exact wire shape, its limits with
   a boundary pair each, and the `nfm_reply` reply;
+  `tests/commerce.rs` covers the `catalog_message` body and the order builders:
+  the exact JSON, every published limit with a boundary pair, the prices and
+  counts the inbound parser must refuse to read, and that no unpublished
+  ceiling (item count, order text) is invented;
   `tests/reqwest_transport.rs` drives the bundled transport against a local
   socket and a refused connection.
 * **Property** (`proptest`) — webhook parsing never panics over arbitrary JSON,
   sign/verify round-trips for arbitrary secrets and bodies, text acceptance
   matches the documented boundary, backoff stays bounded, queries stay
-  percent-encoded, and "no non-idempotent request is retried after a 5xx" holds
-  for every status, budget and attempt count.
-* **Doctest** — every public item has a runnable example (539 doctests).
   percent-encoded, an address value survives the wire unchanged, and "no
   non-idempotent request is retried after a 5xx" holds for every status, budget
   and attempt count.
-* **Doctest** — every public item has a runnable example (488 doctests).
+* **Doctest** — every public item has a runnable example (630 doctests).
   Delivery-status parsing is included: wamid acceptance matches its documented
   rules exactly, `DeliveryStatus` round-trips through its wire spelling with an
   unknown word preserved verbatim, any JSON shape for `status` decodes, and
   `MessageStatus::parse_all` only ever reports a structural one — a body that
   cannot carry a status, or an entry whose shape is unreadable.
-* **Doctest** — every public item has a runnable example (417 doctests).
 * **Fuzz** (`fuzz/`, nightly) — one libFuzzer target per parser, each pinning the
   invariant it protects instead of only "does not panic":
   * `webhook_payload` — arbitrary JSON through the permissive parser; a key the

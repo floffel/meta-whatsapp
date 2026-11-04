@@ -25,9 +25,9 @@ use meta_whatsapp::template::{
 };
 use meta_whatsapp::usage::{BusinessUseCaseUsage, UseCaseUsage};
 use meta_whatsapp::{
-    AddressMessage, AudioMessage, ButtonMessage, ContactCard, ContactName, ContactOrg,
-    ContactsMessage, DocumentMessage, EmailType, Error, FlowAction, FlowMessage, FlowMode,
-    HeaderText, ImageMessage, InteractiveMessage, ListMessage, ListRow, ListSection,
+    AddressMessage, AudioMessage, ButtonMessage, CatalogMessage, ContactCard, ContactName,
+    ContactOrg, ContactsMessage, DocumentMessage, EmailType, Error, FlowAction, FlowMessage,
+    FlowMode, HeaderText, ImageMessage, InteractiveMessage, ListMessage, ListRow, ListSection,
     LocationMessage, MediaBytes as ReexportedMediaBytes, Message, MessageBody, MultiProductMessage,
     Order, OrderItem, PhoneType, ProductItem, ProductSection, ReactionMessage, RecipientType,
     RegisterRequest, RegistrationBackup, ReplyButton, SingleProductMessage, StickerMessage,
@@ -73,6 +73,10 @@ fn every_body_reports_its_wire_type() {
                     .section(ProductSection::from_ids(["sku"])),
             )
             .into(),
+            "interactive",
+        ),
+        (
+            CatalogMessage::new("sku-thumb", "Browse").into(),
             "interactive",
         ),
         (TemplateMessage::new("t", "de").into(), "template"),
@@ -960,7 +964,8 @@ fn the_order_block_is_typed_from_the_crate_root() {
     // The same type through its module path, and the default is empty.
     let direct: meta_whatsapp::types::Order =
         serde_json::from_str(r#"{"catalog_id":"c"}"#).unwrap();
-    assert!(direct.product_items.is_empty());
+    let no_items: Vec<meta_whatsapp::OrderItem> = Vec::new();
+    assert_eq!(direct.product_items, no_items);
     assert_eq!(Order::default().extra.len(), 0);
     assert_eq!(OrderItem::default().line_total(), None);
 }
