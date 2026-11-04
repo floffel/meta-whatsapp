@@ -678,7 +678,8 @@ fn the_quantity_boundaries_are_pinned() {
 #[test]
 fn missing_members_default_instead_of_failing() {
     let order = order_block(&json!({"catalog_id": "c"})).expect("an order without items parses");
-    assert!(order.product_items.is_empty());
+    let no_items: Vec<meta_whatsapp::OrderItem> = Vec::new();
+    assert_eq!(order.product_items, no_items);
     assert_eq!(order.text, None);
 
     // A member of the wrong shape is kept, not coerced into a value.
@@ -705,7 +706,8 @@ fn a_line_item_that_is_not_an_object_is_skipped() {
 fn an_order_that_is_not_an_object_still_parses() {
     let order = order_block(&json!("unusable")).expect("the message must survive");
     assert_eq!(order.catalog_id, "");
-    assert!(order.product_items.is_empty());
+    let no_items: Vec<meta_whatsapp::OrderItem> = Vec::new();
+    assert_eq!(order.product_items, no_items);
     assert_eq!(order.extra["value"], "unusable");
 }
 

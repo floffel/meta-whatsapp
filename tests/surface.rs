@@ -964,7 +964,8 @@ fn the_order_block_is_typed_from_the_crate_root() {
     // The same type through its module path, and the default is empty.
     let direct: meta_whatsapp::types::Order =
         serde_json::from_str(r#"{"catalog_id":"c"}"#).unwrap();
-    assert!(direct.product_items.is_empty());
+    let no_items: Vec<meta_whatsapp::OrderItem> = Vec::new();
+    assert_eq!(direct.product_items, no_items);
     assert_eq!(Order::default().extra.len(), 0);
     assert_eq!(OrderItem::default().line_total(), None);
 }
