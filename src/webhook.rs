@@ -181,13 +181,23 @@ impl WebhookVerifier {
 
     /// Checks `header` against `body` in constant time.
     ///
-    /// ```
+    /// The header must be exactly `sha256=` followed by 64 lowercase hex
+    /// digits — the shape Meta sends and [`WebhookVerifier::sign`] produces. An
+    /// uppercased digest is *not* accepted: it decodes to the same 32 bytes,
+    /// but "byte-identical to what we signed" is the rule the crate documents
+    /// and the fuzz target pins, and a verifier that quietly widens its input
+    /// alphabet is harder to reason about.
+    ///
+    /// ```rust
     /// use meta_whatsapp::WebhookVerifier;
     ///
     /// let verifier = WebhookVerifier::new("secret")?;
     /// let header = verifier.sign(b"{}");
     /// assert!(verifier.verify(b"{}", &header).is_ok());
     /// assert!(verifier.verify(b"{ }", &header).is_err());
+    ///
+    /// let upper = format!("sha256={}", header["sha256=".len()..].to_uppercase());
+    /// assert!(verifier.verify(b"{}", &upper).is_err());
     /// # Ok::<(), meta_whatsapp::Error>(())
     /// ```
     ///
@@ -203,6 +213,15 @@ impl WebhookVerifier {
         let hex_part = header
             .strip_prefix("sha256=")
             .ok_or_else(|| Error::MalformedSignature(header.to_string()))?;
+        // `hex::decode` also takes uppercase, which would make the accepted set
+        // wider than `sign()` can ever produce; check the alphabet first.
+        if hex_part.len() != 64
+            || !hex_part
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(Error::MalformedSignature(header.to_string()));
+        }
         let received =
             hex::decode(hex_part).map_err(|_| Error::MalformedSignature(header.to_string()))?;
         // A SHA-256 MAC is always 32 bytes. Anything else cannot be a valid

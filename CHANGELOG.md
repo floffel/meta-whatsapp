@@ -236,6 +236,16 @@ of the README.
   declared-length, close-delimited, chunked and zero-byte bodies, and
   `download_media` at the default. Closes #11.
 
+### Fixed
+- `WebhookVerifier::verify` accepted an uppercased digest (`sha256=AB12…`): it
+  stripped the `sha256=` prefix and hex-decoded the rest, and `hex::decode`
+  takes uppercase, so a header reached `Ok(())` that `sign()` can never produce
+  and that the documented "byte-identical" rule refuses. The header is now
+  checked against `sha256=` plus 64 lowercase hex digits before decoding, and
+  the "malformed headers" test carries the case that was missing — uppercasing
+  the digest while leaving the prefix alone. Found by
+  `cargo fuzz run webhook_signature` on the committed seeds.
+
 ## [0.1.5] - 2026-10-27
 
 ### Changed
