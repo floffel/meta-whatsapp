@@ -79,6 +79,9 @@ fn malformed_headers_are_rejected() {
     let verifier = verifier();
     let good = verifier.sign(BODY);
     let uppercase = good.to_uppercase();
+    // Uppercasing only the digest leaves the `sha256=` prefix intact, so this
+    // exercises the hex alphabet rather than the prefix check.
+    let hex_uppercase = format!("sha256={}", good["sha256=".len()..].to_uppercase());
     let short = &good[..good.len() - 2];
     let long = format!("{good}00");
     for header in [
@@ -88,6 +91,7 @@ fn malformed_headers_are_rejected() {
         "sha256=zz",
         "sha256=00",
         uppercase.as_str(),
+        hex_uppercase.as_str(),
         short,
         long.as_str(),
         &format!(" {good}"),
