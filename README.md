@@ -333,12 +333,23 @@ semantics.
 | `subscribe_webhooks(waba_id, config)` | `POST /{waba_id}/subscribed_apps` (`override_callback_uri`, `verify_token`) |
 | `unsubscribe_webhooks(waba_id)` | `DELETE /{waba_id}/subscribed_apps` |
 | `ensure_webhook_subscription(waba_id, app_id)` | list, then subscribe **only if** the app is missing |
+| `app_webhook_subscriptions(app_id)` | `GET /{app_id}/subscriptions` |
+| `subscribe_app_webhooks(app_id, request)` | `POST /{app_id}/subscriptions` (`object`, `callback_url`, `verify_token`, `fields`) |
+| `ensure_app_webhook_subscription(app_id, request)` | list, then write only when the callback or exact field set differs |
 
 `ensure_webhook_subscription` is the safe thing to call on start-up and again on
 an error path: it never re-POSTs an existing subscription, and it reports
 `SubscriptionState::{AlreadySubscribed, Subscribed}` so you can log which
 happened. A 401 from the list is returned as is instead of attempting a write
 with a token the API just rejected.
+
+The app-level calls are a separate step: `SubscriptionField` chooses the fields
+Meta sends for every WABA attached to the app, while the WABA-level calls attach
+or detach this app. `AppWebhookSubscriptionRequest` validates the HTTPS callback
+and field list before the wire. `subscribe_app_webhooks` treats the POST as
+idempotent so a transient 5xx can be retried; `ensure_app_webhook_subscription`
+reads first and reports `AppSubscriptionState::{AlreadySubscribed, Subscribed,
+Updated}`, with no POST when the callback and exact field set already match.
 
 ## Webhook
 
@@ -415,8 +426,8 @@ to need a patch release — `docs/contracts.md` records the sources:
   `whatsapp_business_api_data`, but not every documented example does; both parse.
 * **Field-level subscription.** There is no `subscribed_fields` parameter on the
   WABA node — field selection lives on the app-level `/{app_id}/subscriptions`
-  endpoint, which this crate does not implement. `subscribe_webhooks` covers the
-  WABA-level subscription only.
+  endpoint. The response examples show fields as both bare strings and
+  `{name, version}` objects, so both shapes parse.
 * **Re-subscribe on 401.** Nothing in the docs says a 401 implies a lost
   subscription, so `ensure_webhook_subscription` re-reads instead of
   re-subscribing blindly.
@@ -480,8 +491,6 @@ this section when its issue closes.
   (`InteractiveReply::nfm_reply`; address replies do have a typed decoder,
   `AddressReply`); decrypting and serving flows is a server concern, not a
   client one.
-* **App-level webhook field subscription** (`/{app_id}/subscriptions`) and
-  registering the callback URL itself — issue #9.
 * **WABA-level phone-number listing / onboarding** (`GET|POST /{waba_id}/phone_numbers`,
   its `register`, `request_code`) — issue #9. The per-number quality and limits *and*
   the per-number lifecycle (register / deregister / two-step PIN) *are* covered above;

@@ -10,6 +10,13 @@ of the README.
 ## [Unreleased]
 
 ### Added
+- App-level webhook field subscriptions (#23): typed `SubscriptionField` values
+  (`messages`, `message_template_status_update`, `phone_number_quality_update`,
+  and unknown future names), an exact `AppWebhookSubscriptionRequest` body,
+  `app_webhook_subscriptions`, idempotent `subscribe_app_webhooks`, and
+  `ensure_app_webhook_subscription` with `AlreadySubscribed` / `Subscribed` /
+  `Updated` outcomes. Callback/token/field validation happens before the wire;
+  malformed read responses retain serde as the source.
 - The bundled `ReqwestTransport` now has documented 60-second total and
   10-second connect deadlines (`DEFAULT_REQUEST_TIMEOUT` and
   `DEFAULT_CONNECT_TIMEOUT`), with transport-level overrides and the existing

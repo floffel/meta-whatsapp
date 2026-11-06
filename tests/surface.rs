@@ -18,7 +18,11 @@ use meta_whatsapp::message::{
     PRODUCTS_MAX, PRODUCT_ITEMS_MAX, PRODUCT_SECTIONS_MAX, PRODUCT_SECTION_TITLE_MAX_CHARS,
 };
 use meta_whatsapp::status::DeliveryStatus;
-use meta_whatsapp::subscription::{SubscriptionConfig, SubscriptionState, WebhookSubscriptions};
+use meta_whatsapp::subscription::{
+    validate_app_id, AppSubscriptionState, AppWebhookSubscription, AppWebhookSubscriptionRequest,
+    AppWebhookSubscriptions, SubscribedWebhookField, SubscriptionConfig, SubscriptionField,
+    SubscriptionState, WebhookSubscriptions,
+};
 use meta_whatsapp::template::{
     TemplateButtonType, TemplateComponent, TemplateLanguage, TemplateMediaKind, TemplateParameter,
     TemplateQuery,
@@ -517,6 +521,157 @@ fn subscription_helpers_cover_their_arms() {
         SubscriptionConfig::new().to_json().unwrap(),
         serde_json::json!({})
     );
+}
+
+#[test]
+fn app_subscription_helpers_cover_their_arms() {
+    for (field, wire) in [
+        (SubscriptionField::Messages, "messages"),
+        (
+            SubscriptionField::MessageTemplateStatusUpdate,
+            "message_template_status_update",
+        ),
+        (
+            SubscriptionField::PhoneNumberQualityUpdate,
+            "phone_number_quality_update",
+        ),
+        (SubscriptionField::Unknown("future".into()), "future"),
+    ] {
+        assert_eq!(SubscriptionField::parse(wire), field);
+        assert_eq!(field.as_str(), wire);
+        assert_eq!(
+            serde_json::to_value(&field).unwrap(),
+            serde_json::Value::String(wire.into())
+        );
+        assert_eq!(
+            serde_json::from_value::<SubscriptionField>(serde_json::json!(wire)).unwrap(),
+            field
+        );
+    }
+
+    let field = SubscribedWebhookField::new(SubscriptionField::Messages).version("v23.0");
+    assert_eq!(field.name, SubscriptionField::Messages);
+    assert_eq!(field.version.as_deref(), Some("v23.0"));
+    assert_eq!(
+        serde_json::to_value(&field).unwrap(),
+        serde_json::json!({"name": "messages", "version": "v23.0"})
+    );
+}
+
+#[test]
+fn app_subscription_requests_and_states_cover_their_arms() {
+    let plain: SubscribedWebhookField =
+        serde_json::from_value(serde_json::json!("messages")).unwrap();
+    assert_eq!(
+        plain,
+        SubscribedWebhookField::new(SubscriptionField::Messages)
+    );
+
+    let request = AppWebhookSubscriptionRequest::new(
+        "https://a.test/h",
+        "s3cret",
+        [
+            SubscriptionField::Messages,
+            SubscriptionField::Messages,
+            SubscriptionField::PhoneNumberQualityUpdate,
+        ],
+    );
+    assert_eq!(request.callback_url(), "https://a.test/h");
+    assert_eq!(
+        request.fields(),
+        [
+            SubscriptionField::Messages,
+            SubscriptionField::PhoneNumberQualityUpdate
+        ],
+        "duplicates are removed in first-seen order"
+    );
+    assert_eq!(
+        request.to_json().unwrap()["fields"],
+        "messages,phone_number_quality_update"
+    );
+    let debug = format!("{request:?}");
+    assert!(!debug.contains("s3cret"));
+    assert!(debug.contains("[redacted]"));
+}
+
+#[test]
+fn app_subscription_comparison_and_parsing_cover_their_arms() {
+    let subscription: AppWebhookSubscription = serde_json::from_value(serde_json::json!({
+        "object": "whatsapp_business_account",
+        "callback_url": "https://a.test/h",
+        "active": true,
+        "fields": [{"name": "messages", "version": "v23.0"}]
+    }))
+    .unwrap();
+    assert!(subscription.is_whatsapp_business_account());
+    assert!(subscription.has_field(&SubscriptionField::Messages));
+    assert!(!subscription.has_field(&SubscriptionField::PhoneNumberQualityUpdate));
+
+    let request = AppWebhookSubscriptionRequest::new(
+        "https://a.test/h",
+        "s3cret",
+        [
+            SubscriptionField::Messages,
+            SubscriptionField::PhoneNumberQualityUpdate,
+        ],
+    );
+
+    let current = AppWebhookSubscriptions::parse(&serde_json::json!({"data": [{
+        "object": "whatsapp_business_account",
+        "callback_url": "https://a.test/h",
+        "active": true,
+        "fields": ["phone_number_quality_update", "messages"]
+    }]}))
+    .unwrap();
+    assert!(
+        request.is_applied_to(&current),
+        "field order does not matter"
+    );
+
+    let inactive = AppWebhookSubscriptions::parse(&serde_json::json!({"data": [{
+        "object": "whatsapp_business_account",
+        "callback_url": "https://a.test/h",
+        "active": false,
+        "fields": ["phone_number_quality_update", "messages"]
+    }]}))
+    .unwrap();
+    assert!(!request.is_applied_to(&inactive));
+    assert!(!request.is_applied_to(&AppWebhookSubscriptions::default()));
+
+    let stale = AppWebhookSubscriptions::parse(&serde_json::json!({"data": [{
+        "object": "whatsapp_business_account",
+        "callback_url": "https://a.test/h",
+        "active": true,
+        "fields": ["messages"]
+    }]}))
+    .unwrap();
+    assert!(!request.is_applied_to(&stale), "an extra field is a change");
+
+    for value in [serde_json::json!({"data": "nope"}), serde_json::json!("x")] {
+        assert!(matches!(
+            AppWebhookSubscriptions::parse(&value),
+            Err(Error::Json { .. })
+        ));
+    }
+}
+
+#[test]
+fn app_subscription_ids_and_state_cover_their_boundaries() {
+    assert!(validate_app_id("123").is_ok());
+    assert!(validate_app_id(&"1".repeat(32)).is_ok());
+    for bad in ["", "../me", "12a", &"1".repeat(33)] {
+        assert!(matches!(
+            validate_app_id(bad),
+            Err(Error::Validation {
+                field: "app_id",
+                ..
+            })
+        ));
+    }
+
+    assert!(!AppSubscriptionState::AlreadySubscribed.was_written());
+    assert!(AppSubscriptionState::Subscribed.was_written());
+    assert!(AppSubscriptionState::Updated.was_written());
 }
 
 #[test]
