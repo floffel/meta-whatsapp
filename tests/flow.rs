@@ -4,9 +4,10 @@
 
 mod common;
 
-use common::{client, Body, Call, MockTransport};
+use common::{client, json_response, Body, Call, MockTransport};
 use meta_whatsapp::flow::{
-    validate_screen_data, validate_screen_name, FLOW_CTA_MAX_CHARS, FLOW_MESSAGE_VERSION,
+    validate_flow_id, validate_screen_data, validate_screen_name, Flow, FlowGetRequest,
+    FlowPreviewRequest, FlowStatus, FLOW_CTA_MAX_CHARS, FLOW_ID_MAX_BYTES, FLOW_MESSAGE_VERSION,
     FLOW_SCREEN_MAX_CHARS, FLOW_TOKEN_MAX_BYTES,
 };
 use meta_whatsapp::transport::Method;
@@ -470,4 +471,358 @@ async fn a_flow_round_trips_from_send_to_reply() {
         response.get("data").and_then(|data| data.get("slot")),
         Some(&json!("2026-11-03T09:00"))
     );
+}
+
+// ---------------------------------------------------------------------------
+// Flow get / preview: the read side of the API.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn flow_get_records_the_default_path_and_parses_a_sparse_response() {
+    let transport = MockTransport::new();
+    transport.push_response(json_response(&json!({"id": "flow-1"})));
+    let client = client(transport.clone());
+
+    let flow = client.flow(&FlowGetRequest::new("flow-1")).await.unwrap();
+    assert_eq!(flow.id.as_deref(), Some("flow-1"));
+    assert!(flow.name.is_none());
+    assert_eq!(flow.validation_errors, []);
+
+    let call = transport.only_call();
+    assert_eq!(call.method, Method::Get);
+    assert_eq!(call.url, "https://graph.facebook.com/v21.0/flow-1");
+    assert_eq!(call.body, Body::Empty);
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // One full documented response keeps its assertions together.
+async fn flow_get_encodes_nested_fields_and_decodes_the_full_documented_shape() {
+    let transport = MockTransport::new();
+    transport.push_response(json_response(&json!({
+        "id": "flow-1",
+        "name": "Appointments",
+        "status": "PAUSED",
+        "categories": ["APPOINTMENT_BOOKING"],
+        "json_version": "5.0",
+        "data_api_version": "3.0",
+        "data_channel_uri": "https://example.test/data",
+        "endpoint_uri": "https://example.test/flow",
+        "preview": {
+            "preview_url": "https://business.facebook.com/wa/manage/flows/1/preview/?token=t",
+            "expires_at": 1_735_689_600_u64
+        },
+        "validation_errors": [{
+            "error": "INVALID_PROPERTY",
+            "error_type": "JSON_SCHEMA_ERROR",
+            "message": "The property is not allowed",
+            "line_start": 46,
+            "line_end": 46,
+            "column_start": 17,
+            "column_end": 30,
+            "pointers": [{
+                "line_start": 46,
+                "column_start": 17,
+                "path": "screens [0].layout.children [0].type"
+            }]
+        }, "legacy scalar detail"],
+        "health_status": {
+            "can_send_message": "BLOCKED",
+            "entities": [{
+                "id": "waba-1",
+                "entity_type": "WABA",
+                "can_send_message": "BLOCKED",
+                "errors": [{
+                    "error_code": 141_006,
+                    "error_description": "The payment method is unavailable.",
+                    "possible_solution": "Add a payment method."
+                }]
+            }]
+        },
+        "whatsapp_business_account": {
+            "id": "waba-1",
+            "name": "Example WABA",
+            "business_type": "ent",
+            "message_template_namespace": "namespace-1",
+            "timezone_id": "54"
+        },
+        "application": {
+            "id": "app-1",
+            "name": "Example App",
+            "link": "https://example.test/app"
+        },
+        "metric": {"name": "ENDPOINT_REQUEST_COUNT"}
+    })));
+    let client = client(transport.clone());
+    let query = FlowGetRequest::new("flow-1")
+        .fields(["id", "name", "health_status.phone_number(123)", "preview"])
+        .date_format("U");
+
+    let flow = client.flow(&query).await.unwrap();
+    assert_eq!(flow.name.as_deref(), Some("Appointments"));
+    assert_eq!(flow.status, Some(FlowStatus::Unknown("PAUSED".into())));
+    assert_eq!(flow.categories, ["APPOINTMENT_BOOKING"]);
+    assert_eq!(flow.json_version.as_deref(), Some("5.0"));
+    assert_eq!(flow.data_api_version.as_deref(), Some("3.0"));
+    assert_eq!(
+        flow.data_channel_uri.as_deref(),
+        Some("https://example.test/data")
+    );
+    assert_eq!(
+        flow.endpoint_uri.as_deref(),
+        Some("https://example.test/flow")
+    );
+    assert_eq!(flow.extra["metric"]["name"], "ENDPOINT_REQUEST_COUNT");
+
+    let preview = flow.preview.as_ref().unwrap();
+    assert!(preview.preview_url.as_deref().unwrap().contains("token=t"));
+    assert_eq!(preview.expires_at_secs(), Some(1_735_689_600));
+
+    let validation = &flow.validation_errors[0];
+    assert_eq!(validation.line_start, Some(46));
+    assert_eq!(validation.column_end, Some(30));
+    assert_eq!(
+        validation.pointers[0].path.as_deref(),
+        Some("screens [0].layout.children [0].type")
+    );
+    assert_eq!(
+        flow.validation_errors[1].extra["value"],
+        "legacy scalar detail"
+    );
+
+    let health = flow.health_status.as_ref().unwrap();
+    assert_eq!(health.can_send_message.as_deref(), Some("BLOCKED"));
+    assert_eq!(health.entities[0].entity_type.as_deref(), Some("WABA"));
+    assert_eq!(
+        health.entities[0].errors[0]
+            .error_code
+            .as_ref()
+            .and_then(serde_json::Number::as_u64),
+        Some(141_006)
+    );
+    assert_eq!(
+        flow.whatsapp_business_account
+            .as_ref()
+            .unwrap()
+            .timezone_id
+            .as_deref(),
+        Some("54")
+    );
+    assert_eq!(
+        flow.application.as_ref().unwrap().name.as_deref(),
+        Some("Example App")
+    );
+
+    let call = transport.only_call();
+    assert_eq!(call.method, Method::Get);
+    assert_eq!(
+        call.url,
+        "https://graph.facebook.com/v21.0/flow-1?fields=id%2Cname%2Chealth_status.phone_number%28123%29%2Cpreview&date_format=U"
+    );
+}
+
+#[tokio::test]
+async fn flow_preview_keeps_or_invalidates_the_link_as_requested() {
+    let transport = MockTransport::new();
+    transport.push_response(json_response(&json!({
+        "id": "flow-1",
+        "preview": {
+            "preview_url": "https://business.facebook.com/wa/manage/flows/1/preview/?token=a",
+            "expires_at": "2026-12-06T00:00:00+0000"
+        }
+    })));
+    transport.push_response(json_response(&json!({
+        "id": "flow-1",
+        "preview": {
+            "preview_url": "https://business.facebook.com/wa/manage/flows/1/preview/?token=b",
+            "expires_at": 1_798_848_000_u64
+        },
+        "field_added_later": true
+    })));
+    let client = client(transport.clone());
+
+    let kept = client
+        .flow_preview(&FlowPreviewRequest::new("flow-1"))
+        .await
+        .unwrap();
+    assert!(kept
+        .preview
+        .as_ref()
+        .unwrap()
+        .preview_url
+        .as_deref()
+        .unwrap()
+        .ends_with("token=a"));
+    assert_eq!(kept.preview.as_ref().unwrap().expires_at_secs(), None);
+
+    let refreshed = client
+        .flow_preview(
+            &FlowPreviewRequest::new("flow-1")
+                .invalidate(true)
+                .date_format("U"),
+        )
+        .await
+        .unwrap();
+    assert!(refreshed
+        .preview
+        .as_ref()
+        .unwrap()
+        .preview_url
+        .as_deref()
+        .unwrap()
+        .ends_with("token=b"));
+    assert_eq!(
+        refreshed.preview.as_ref().unwrap().expires_at_secs(),
+        Some(1_798_848_000)
+    );
+    assert_eq!(refreshed.extra["field_added_later"], true);
+
+    let calls = transport.calls();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(
+        calls[0].url,
+        "https://graph.facebook.com/v21.0/flow-1?fields=preview.invalidate%28false%29"
+    );
+    assert_eq!(
+        calls[1].url,
+        "https://graph.facebook.com/v21.0/flow-1?fields=preview.invalidate%28true%29&date_format=U"
+    );
+    assert!(calls
+        .iter()
+        .all(|call| call.method == Method::Get && call.body == Body::Empty));
+}
+
+#[test]
+fn flow_id_boundary_is_256_bytes_and_the_alphabet_is_path_safe() {
+    let longest = "a".repeat(FLOW_ID_MAX_BYTES);
+    assert!(validate_flow_id(&longest).is_ok());
+    assert!(validate_flow_id(&format!("{longest}a")).is_err());
+    assert!(validate_flow_id("A_b-9").is_ok());
+
+    for bad in [
+        "",
+        "../me",
+        "flow/1",
+        "flow?fields=id",
+        "flow#x",
+        "flow id",
+        "flow.1",
+        "flow:1",
+    ] {
+        assert!(
+            validate_flow_id(bad).is_err(),
+            "{bad:?} was accepted as a Flow id"
+        );
+    }
+}
+
+#[tokio::test]
+async fn invalid_flow_requests_never_reach_the_transport() {
+    let transport = MockTransport::new();
+    let client = client(transport.clone());
+
+    for flow_id in [
+        String::new(),
+        "../me".to_string(),
+        "x".repeat(FLOW_ID_MAX_BYTES + 1),
+    ] {
+        for result in [
+            client
+                .flow(&FlowGetRequest::new(&flow_id))
+                .await
+                .map(|_| ()),
+            client
+                .flow_preview(&FlowPreviewRequest::new(&flow_id))
+                .await
+                .map(|_| ()),
+        ] {
+            match result {
+                Err(Error::Validation { field, .. }) => assert_eq!(field, "flow_id"),
+                other => panic!("Flow id {flow_id:?} was not rejected: {other:?}"),
+            }
+        }
+    }
+
+    for fields in [
+        vec![""],
+        vec!["id&limit=1"],
+        vec!["Name"],
+        vec!["id;limit=1"],
+    ] {
+        let error = client
+            .flow(&FlowGetRequest::new("flow-1").fields(fields))
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            Error::Validation {
+                field: "fields",
+                ..
+            }
+        ));
+    }
+
+    for format in ["", "\u{7f}"] {
+        let error = client
+            .flow(&FlowGetRequest::new("flow-1").date_format(format))
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            Error::Validation {
+                field: "date_format",
+                ..
+            }
+        ));
+        let error = client
+            .flow_preview(&FlowPreviewRequest::new("flow-1").date_format(format))
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            Error::Validation {
+                field: "date_format",
+                ..
+            }
+        ));
+    }
+
+    assert_eq!(transport.call_count(), 0);
+}
+
+#[test]
+fn flow_parsing_is_permissive_but_retains_serde_errors() {
+    let flow = Flow::parse(&json!({
+        "status": "FUTURE_STATUS",
+        "validation_errors": [42],
+        "health_status": {"entities": [{"future": true}]}
+    }))
+    .unwrap();
+    assert_eq!(
+        flow.status,
+        Some(FlowStatus::Unknown("FUTURE_STATUS".into()))
+    );
+    assert_eq!(flow.validation_errors[0].extra["value"], 42);
+    assert_eq!(
+        flow.health_status.unwrap().entities[0].extra["future"],
+        true
+    );
+
+    let error = Flow::parse(&json!({"categories": "not an array"})).unwrap_err();
+    assert!(matches!(error, Error::Json { .. }));
+    assert!(std::error::Error::source(&error).is_some());
+}
+
+#[test]
+fn every_documented_flow_status_is_typed() {
+    for (raw, expected) in [
+        ("DRAFT", FlowStatus::Draft),
+        ("PUBLISHED", FlowStatus::Published),
+        ("DEPRECATED", FlowStatus::Deprecated),
+        ("BLOCKED", FlowStatus::Blocked),
+        ("THROTTLED", FlowStatus::Throttled),
+    ] {
+        let status = FlowStatus::parse(raw);
+        assert_eq!(status, expected);
+        assert_eq!(status.as_str(), raw);
+    }
 }

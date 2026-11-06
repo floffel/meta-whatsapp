@@ -5,7 +5,7 @@ Typed client and webhook toolkit for the [WhatsApp Cloud API](https://developers
 Four independent parts, all usable on their own:
 
 * **Webhook** — constant-time `X-Hub-Signature-256` verification, GET handshake, replay window, and the payload parsed into types (message events, statuses with the `phone_number_id` they arrived on, unknown future events).
-* **Client** — every message family, media upload/download/delete, template listing, and account administration (business profile, phone-number quality and limits, blocklist, webhook subscriptions).
+* **Client** — every message family, media upload/download/delete, template listing, Flow get/preview reads, and account administration (business profile, phone-number quality and limits, blocklist, webhook subscriptions).
 * **Address forms** — the `address_message` interactive form and the typed decoder for the `nfm_reply` a customer submits, usable with or without the client.
 * **Webhook** — constant-time `X-Hub-Signature-256` verification, GET handshake, replay window, and the payload parsed into types (message events, statuses, unknown future events).
 * **Client** — every message family, media upload/download/delete, template listing, delivery status of a sent message, and account administration (business profile, phone-number quality and limits, blocklist, webhook subscriptions).
@@ -515,12 +515,16 @@ this section when its issue closes.
   three-letter ISO currency — before it invoices or forwards it. The item count
   and the order `text` are deliberately uncapped: Meta publishes no ceiling for
   either, and its own example sends `"text": ""`.
-* **Flow API beyond the message pair** — issue #26: asset upload, the
-  data-exchange encryption endpoints and the flow preview/get endpoints. The
-  message pair itself is complete: outbound `FlowMessage`, and inbound typed
-  `FlowReply` whose `response_json` decodes through `FlowReply::response` into
-  a `FlowResponse` (`flow_token`, `get`, `field`). Decrypting and serving flows
-  stays a server concern, not a client one.
+* **Flow API beyond get/preview and the message pair** — issue #26: asset
+  upload and the data-exchange encryption endpoints remain open. Both read-side
+  calls are covered: `WhatsAppClient::flow` with `FlowGetRequest` returns the
+  typed `Flow` metadata, while `WhatsAppClient::flow_preview` with
+  `FlowPreviewRequest` returns `FlowPreviewResponse` and can invalidate the
+  previous 30-day link. The message pair itself is complete: outbound
+  `FlowMessage`, and inbound typed `FlowReply` whose `response_json` decodes
+  through `FlowReply::response` into a `FlowResponse` (`flow_token`, `get`,
+  `field`). Decrypting and serving flows stays a server concern, not a client
+  one.
 * **Flow data-exchange endpoints** — issue #8. Until then the inbound
   `nfm_reply` payload of a Flow is passed through raw
   (`InteractiveReply::nfm_reply`; address replies do have a typed decoder,

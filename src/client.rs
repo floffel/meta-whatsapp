@@ -46,6 +46,7 @@ use crate::business::{
     PHONE_NUMBER_FIELDS,
 };
 use crate::error::{Error, Result};
+use crate::flow::{Flow, FlowGetRequest, FlowPreviewRequest, FlowPreviewResponse};
 use crate::media::{parse_retry_after, validate_media_id, MediaBytes, MediaInfo, MediaUpload};
 use crate::message::{MessageRequest, TextMessage};
 use crate::phone_number::{
@@ -1289,6 +1290,94 @@ impl<T: Transport> WhatsAppClient<T> {
         PhoneNumberInfo::parse(&response.json()?)
     }
 
+    /// Reads one Flow and its requested metadata fields.
+    ///
+    /// With no fields selected this calls `GET /{flow-id}` and lets Meta return
+    /// its default fields. A non-empty [`FlowGetRequest::fields`] list is
+    /// percent-encoded into the query string, including nested expressions such
+    /// as `health_status.phone_number(123)`. This is a read, so a 5xx is safe to
+    /// retry.
+    ///
+    /// ```
+    /// # use meta_whatsapp::{Result, Transport, WhatsAppClient, transport::{Request, Response}};
+    /// use meta_whatsapp::flow::FlowGetRequest;
+    /// # struct Mock;
+    /// # impl Transport for Mock {
+    /// #     async fn execute(&self, request: Request<'_>) -> Result<Response> {
+    /// #         assert_eq!(request.url, "https://graph.facebook.com/v21.0/flow-1?fields=id%2Cname");
+    /// #         Ok(Response::new(200, std::iter::empty(), br#"{"id":"flow-1","name":"Appointments","status":"DRAFT"}"#.to_vec()))
+    /// #     }
+    /// # }
+    /// # async fn demo() -> Result<()> {
+    /// let client = WhatsAppClient::new("1", "t", Mock);
+    /// let flow = client
+    ///     .flow(&FlowGetRequest::new("flow-1").fields(["id", "name"]))
+    ///     .await?;
+    /// assert_eq!(flow.name.as_deref(), Some("Appointments"));
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an unsafe Flow id, field expression or date
+    /// format, before any request; then transport, Graph API and decoding
+    /// errors.
+    pub async fn flow(&self, request: &FlowGetRequest) -> Result<Flow> {
+        request.validate()?;
+        let mut url = self.flow_url(&request.flow_id);
+        let query = request.query_string();
+        if !query.is_empty() {
+            url.push('?');
+            url.push_str(&query);
+        }
+        let response = self.execute(Request::get(&url, &self.token)).await?;
+        Flow::parse(&response.json()?)
+    }
+
+    /// Fetches the public web-preview URL for one Flow.
+    ///
+    /// The call is the Flow read with
+    /// `fields=preview.invalidate(false|true)`. Use `invalidate=false` to keep
+    /// the current 30-day link, or `invalidate=true` to replace it with a new
+    /// one. The response carries Meta's expiry value unchanged in
+    /// [`crate::flow::FlowPreviewLink::expires_at`].
+    ///
+    /// ```
+    /// # use meta_whatsapp::{Result, Transport, WhatsAppClient, transport::{Request, Response}};
+    /// use meta_whatsapp::flow::FlowPreviewRequest;
+    /// # struct Mock;
+    /// # impl Transport for Mock {
+    /// #     async fn execute(&self, request: Request<'_>) -> Result<Response> {
+    /// #         assert!(request.url.ends_with("?fields=preview.invalidate%28false%29"));
+    /// #         Ok(Response::new(200, std::iter::empty(), br#"{"id":"flow-1","preview":{"preview_url":"https://example.test/preview","expires_at":"2026-12-06T00:00:00+0000"}}"#.to_vec()))
+    /// #     }
+    /// # }
+    /// # async fn demo() -> Result<()> {
+    /// let client = WhatsAppClient::new("1", "t", Mock);
+    /// let response = client
+    ///     .flow_preview(&FlowPreviewRequest::new("flow-1"))
+    ///     .await?;
+    /// assert_eq!(response.id.as_deref(), Some("flow-1"));
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an unsafe Flow id or date format, before any
+    /// request; then transport, Graph API and decoding errors.
+    pub async fn flow_preview(&self, request: &FlowPreviewRequest) -> Result<FlowPreviewResponse> {
+        request.validate()?;
+        let url = format!(
+            "{}?{}",
+            self.flow_url(&request.flow_id),
+            request.query_string()
+        );
+        let response = self.execute(Request::get(&url, &self.token)).await?;
+        FlowPreviewResponse::parse(&response.json()?)
+    }
+
     /// Lists the blocked users of the bound number — the first page only.
     ///
     /// For the page after this one, pass [`BlockedUsersPage::next_cursor`] to
@@ -2353,6 +2442,10 @@ impl<T: Transport> WhatsAppClient<T> {
             self.api_version,
             path
         )
+    }
+
+    fn flow_url(&self, flow_id: &str) -> String {
+        self.url(flow_id)
     }
 }
 

@@ -10,6 +10,14 @@ of the README.
 ## [Unreleased]
 
 ### Added
+- Flow get and preview reads (#29): `FlowGetRequest` and `FlowPreviewRequest`
+  validate the Flow id and query inputs before the wire, then
+  `WhatsAppClient::flow` and `WhatsAppClient::flow_preview` decode Meta's
+  metadata, validation, health, WABA/application and preview shapes into typed,
+  permissive records. Preview links can be reused or explicitly invalidated;
+  both the date-string and unix-number expiry forms are accepted. The Flow id
+  carries an explicitly crate-side 256-byte URL bound because Meta publishes no
+  provider maximum.
 - App-level webhook field subscriptions (#23): typed `SubscriptionField` values
   (`messages`, `message_template_status_update`, `phone_number_quality_update`,
   and unknown future names), an exact `AppWebhookSubscriptionRequest` body,
