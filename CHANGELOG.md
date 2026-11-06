@@ -17,6 +17,22 @@ of the README.
   `ensure_app_webhook_subscription` with `AlreadySubscribed` / `Subscribed` /
   `Updated` outcomes. Callback/token/field validation happens before the wire;
   malformed read responses retain serde as the source.
+- WABA-level phone-number onboarding (#24). The new `phone_number` module and
+  client methods cover the full documented sequence before registration:
+  `create_waba_phone_number` (`POST /{waba-id}/phone_numbers`),
+  `waba_phone_numbers` / `all_waba_phone_numbers` (cursor-paged
+  `GET /{waba-id}/phone_numbers`), `request_phone_number_code`, and
+  `verify_phone_number_code`. The existing per-number `register` call remains
+  the final step. Listing has typed fields, filters, sort order, a 1..=100 page
+  limit, encoded cursors, and a loop-safe whole-list walk; create validates the
+  documented E.164 digit range and 2..=75 character verified name before the
+  wire. Verification codes are exactly six ASCII digits and live in a
+  `Debug`/`Display`-redacted newtype that the transport also redacts from body
+  logs. Create, request and verify are non-idempotent POSTs, so a lost outcome
+  is `Error::Ambiguous` and is not retried. Tests pin every exact request body,
+  the encoded list query, both sides of every published limit, paging and
+  malformed-response edges, and the delivery rules; documentation of the full
+  onboarding sequence is in the README and `docs/contracts.md`.
 - The bundled `ReqwestTransport` now has documented 60-second total and
   10-second connect deadlines (`DEFAULT_REQUEST_TIMEOUT` and
   `DEFAULT_CONNECT_TIMEOUT`), with transport-level overrides and the existing
