@@ -36,6 +36,20 @@ Secondary sources — the developer reference pages the spec links to:
   — the web-preview request (`GET /{FLOW-ID}?fields=preview.invalidate(…)`),
   its response, the 30-day expiry, and invalidation behavior. The `getFlow`
   operation and full response schema are in the v23 OpenAPI source above.
+* Flow business-encryption public key:
+  `https://developers.facebook.com/documentation/business-messaging/whatsapp/flows/guides/whatsapp-business-encryption/`
+  — the `GET /{Phone-Number-ID}/whatsapp_business_encryption` fields,
+  authentication, and flat response example. The `getBusinessEncryptionPublicKey`
+  operation and wrapped response example are in the v23 OpenAPI source above.
+* Flow endpoint encryption:
+  `https://developers.facebook.com/documentation/business-messaging/whatsapp/flows/guides/implementingyourflowendpoint/`
+  — Meta posts `{encrypted_flow_data, encrypted_aes_key, initial_vector}` to the
+  business's configured HTTPS endpoint. The `data_api_version` `"3.0"` contract
+  decrypts the AES key with RSA/ECB/OAEPWithSHA-256AndMGF1Padding (SHA-256 for
+  MGF1), then decrypts the payload with AES-GCM and a 16-byte authentication tag
+  appended to the ciphertext. A decryption failure is HTTP 421 at the business
+  endpoint. There is no Graph API decrypt path in either the guide or the v23
+  OpenAPI file.
 
 ## Endpoints used
 
@@ -71,6 +85,7 @@ Secondary sources — the developer reference pages the spec links to:
 | `subscribe_app_webhooks` | `POST /{app-id}/subscriptions` | same; body has `object`, `callback_url`, `verify_token`, comma-separated `fields` |
 | `flow` | `GET /{flow-id}?fields=…&date_format=…` | `/{Version}/{Flow-ID}` (`getFlow`) |
 | `flow_preview` | `GET /{flow-id}?fields=preview.invalidate(false\|true)` | same (`getFlow`); preview also from the Flows API guide |
+| `flow_encryption_public_key` | `GET /{phone-number-id}/whatsapp_business_encryption?fields=…` | `/{Version}/{Phone-Number-ID}/whatsapp_business_encryption` (`getBusinessEncryptionPublicKey`) |
 
 ## Shapes and their sources
 
@@ -105,6 +120,8 @@ Secondary sources — the developer reference pages the spec links to:
 | `CatalogMessage` | `Interactive` with `type: catalog_message`, `ActionObject` variant `{name: catalog_message, parameters.thumbnail_product_retailer_id}` (the spec's "Send Catalog Message" example) | The action carries exactly one parameter, the thumbnail product. `BodyObject` — "optional for 'product' type, required for other interactive message types" — is a constructor argument and 1024 bytes; `footer` is optional and 60 characters. No header: the example sends none and the type exists to open the catalog, not to carry media. |
 | `FlowReply` / `FlowResponse` | not present in the v23 OpenAPI file | Shape comes from the flows-webhooks reference, `https://developers.facebook.com/docs/whatsapp/flows/reference/flowswebhooks/`: `interactive.type = "nfm_reply"`, and `interactive.nfm_reply` carries exactly three documented strings — `name`, `body`, `response_json`. The flow's answers, `flow_token` included, are *inside* `response_json` as a JSON document encoded in a string; there is no top-level token field. Decoding is fallible (`Error::Payload`) and the raw string is kept on the struct. |
 | `FlowGetRequest` / `FlowPreviewRequest` | `getFlow` query parameters in the v23 OpenAPI file plus the Flows API preview guide | `fields` and `date_format` are optional. The preview guide sets `fields=preview.invalidate(false)` and documents `true` as invalidation. Flow ids and field expressions are validated before URL construction; the 256-byte id cap is crate-side because the spec gives no maximum. |
+| `FlowEncryptionPublicKeyRequest` | `getBusinessEncryptionPublicKey` phone-number path parameter and `fields` query parameter | `phone_number_id` is digits-only. The OpenAPI path pattern has no maximum; the existing 32-digit crate bound is applied before URL construction. `fields` is the typed set `business_public_key` and `business_public_key_signature_status`. |
+| `FlowEncryptionPublicKeyResponse` / `FlowPublicKeySignatureStatus` | `WhatsAppBusinessEncryptionInfo`, `BusinessPublicKeyVerificationStatus`, and the encryption guide's *Get the business public key* example | `VALID` and `MISMATCH` are typed; unknown values are retained. The OpenAPI response wraps the object in `data[0]`, while the guide example is flat, so both are accepted. Both members remain optional because either can be selected with `fields`. |
 | `Flow` / `FlowPreviewResponse` | `getFlow` response and the guide's *Get Preview URL* example | `Flow` models `id`, `name`, `status`, `categories`, `json_version`, `data_api_version`, `data_channel_uri`, `endpoint_uri`, `preview`, `validation_errors`, `health_status`, `whatsapp_business_account` and `application`; metrics and future fields stay in `extra`. `FlowPreviewResponse` is `{id, preview}`. Every member defaults because field selection makes the response sparse. The guide's `DRAFT`, `PUBLISHED`, `DEPRECATED`, `BLOCKED` and `THROTTLED` statuses are typed; unknown statuses are retained. `preview.expires_at` accepts the documented date string and the `date_format=U` number. |
 | `FlowValidationError` / `FlowValidationPointer` | validate/update Flow JSON examples in the Flows API guide and `getFlow` schema | The schema leaves `validation_errors[]` untyped, while its examples are objects with `error`, `error_type`, `message`, line/column ranges and pointers. Objects are typed; scalar members are retained under `extra.value` so one legacy entry cannot make the Flow unreadable. |
 | `FlowHealthStatus` / `FlowHealthEntity` / `FlowHealthError` | `getFlow` response schema | `can_send_message` is kept as a string because the schema gives examples (`AVAILABLE`, `LIMITED`, `BLOCKED`) but no enum. Entities and their errors are typed; unknown members remain in `extra`. |
@@ -194,3 +211,11 @@ Secondary sources — the developer reference pages the spec links to:
   emitted as the value Meta's own examples use, because a caller-chosen version
   can only be wrong on the wire. Nothing in the docs shows another supported
   value, so making it an option would invent a knob.
+* **There is no Flow decrypt endpoint to wrap.** The issue title asks for a
+  data-exchange decrypt endpoint, but the official endpoint guide defines
+  decryption as local processing inside the business's configured HTTPS
+  endpoint, and the v23 OpenAPI file has no `decrypt` operation. The client
+  therefore exposes the documented public-key Graph read. Implementing local
+  RSA/AES-GCM handling here would require a new crypto dependency and a
+  business-endpoint server API; inventing a Graph request would produce a URL
+  Meta does not serve.

@@ -515,23 +515,32 @@ this section when its issue closes.
   three-letter ISO currency — before it invoices or forwards it. The item count
   and the order `text` are deliberately uncapped: Meta publishes no ceiling for
   either, and its own example sends `"text": ""`.
-* **Flow API beyond the message pair** — issue #26: the data-exchange encryption
-  endpoints remain open. Both read-side calls are covered:
-  `WhatsAppClient::flow` with `FlowGetRequest` returns the typed `Flow` metadata,
-  while `WhatsAppClient::flow_preview` with `FlowPreviewRequest` returns
-  `FlowPreviewResponse` and can invalidate the previous 30-day link. Flow JSON
+* **Flow API beyond get/preview and the message pair** — issue #26: Flow JSON
   asset upload is covered by `upload_flow_asset`: `POST /{flow_id}/assets` with
   the required `FLOW_JSON` asset type and `flow.json` filename, a 10 MiB local
-  ceiling, and typed validation diagnostics in the response. The message pair
-  itself is complete: outbound `FlowMessage`, and inbound typed `FlowReply`
-  whose `response_json` decodes through `FlowReply::response` into a
-  `FlowResponse` (`flow_token`, `get`, `field`). Decrypting and serving flows
-  stays a server concern, not a client one.
-* **Flow data-exchange endpoints** — issue #8. Until then the inbound
-  `nfm_reply` payload of a Flow is passed through raw
-  (`InteractiveReply::nfm_reply`; address replies do have a typed decoder,
-  `AddressReply`); decrypting and serving flows is a server concern, not a
-  client one.
+  ceiling, and typed validation diagnostics in the response. The documented
+  data-exchange public-key call is covered:
+  `WhatsAppClient::flow_encryption_public_key` with
+  `FlowEncryptionPublicKeyRequest` returns the typed public key and signature
+  status, accepting both response envelopes Meta publishes. There is no Graph
+  API decrypt call: Meta posts encrypted fields to the business's configured
+  Flow endpoint, which decrypts them locally with the matching private key
+  (RSA-OAEP SHA-256/MGF1-SHA256, then AES-128-GCM). Decrypting and serving flows
+  therefore stays a server concern. Both read-side Flow calls are also covered:
+  `WhatsAppClient::flow` with `FlowGetRequest` returns the typed `Flow`
+  metadata, while `WhatsAppClient::flow_preview` with `FlowPreviewRequest`
+  returns `FlowPreviewResponse` and can invalidate the previous 30-day link.
+  The message pair itself is complete: outbound `FlowMessage`, and inbound
+  typed `FlowReply` whose `response_json` decodes through
+  `FlowReply::response` into a `FlowResponse` (`flow_token`, `get`, `field`).
+* **Flow data-exchange endpoint traffic** — issue #8. A Flow sends encrypted
+  requests to the business's own HTTPS endpoint rather than to a Graph API
+  route. The key needed to configure that endpoint can now be read with
+  `WhatsAppClient::flow_encryption_public_key`; the endpoint's local decryption,
+  response encryption and `nfm_reply` serving remain server concerns. Until the
+  endpoint integration lands, the inbound `nfm_reply` payload is passed through
+  raw (`InteractiveReply::nfm_reply`; address replies do have a typed decoder,
+  `AddressReply`).
 The only exclusion that does not need an issue is a surface the provider does
 not offer, or has deprecated — and then the README says which, with a link.
 

@@ -18,6 +18,16 @@ of the README.
   Meta's typed validation diagnostics and unknown fields, and `is_valid`
   distinguishes a clean document from one Meta accepted with diagnostics. A 5xx
   is non-idempotent and surfaces as `Error::Ambiguous`.
+- Flow data-exchange public-key reads (#28):
+  `FlowEncryptionPublicKeyRequest` validates the phone-number id before the
+  wire, the typed field set renders the optional `fields` query, and
+  `WhatsAppClient::flow_encryption_public_key` decodes both the guide's flat
+  response and the OpenAPI `data[0]` envelope. `VALID` and `MISMATCH` signature
+  statuses are typed while future values and response members are retained.
+  Meta has no Graph decrypt operation: encrypted Flow requests go to the
+  business's configured HTTPS endpoint, which performs the documented local
+  RSA-OAEP/AES-GCM decryption. That server concern and its required crypto
+  dependency are documented rather than represented by an invented endpoint.
 - Flow get and preview reads (#29): `FlowGetRequest` and `FlowPreviewRequest`
   validate the Flow id and query inputs before the wire, then
   `WhatsAppClient::flow` and `WhatsAppClient::flow_preview` decode Meta's
