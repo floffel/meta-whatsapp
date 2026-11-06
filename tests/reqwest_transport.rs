@@ -115,6 +115,54 @@ async fn wait_for_accepts(accepted: &AtomicUsize, expected: usize) {
     );
 }
 
+/// Answers the first request with `status` and a same-origin redirect target.
+/// A second connection receives a successful send response, so following the
+/// redirect would turn the failed POST into a success.
+async fn serve_redirect_once(status: u16) -> (String, Arc<AtomicUsize>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let base = format!("http://{address}");
+    let accepted = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&accepted);
+    let redirect = format!(
+        "HTTP/1.1 {status} Redirect\r\nLocation: {base}/redirected\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+    );
+
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            let request_number = counter.fetch_add(1, Ordering::SeqCst);
+            let mut head = Vec::new();
+            let mut buffer = [0_u8; 512];
+            loop {
+                match socket.read(&mut buffer).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(read) => {
+                        head.extend_from_slice(&buffer[..read]);
+                        if head.windows(4).any(|window| window == b"\r\n\r\n") {
+                            break;
+                        }
+                    }
+                }
+            }
+
+            let response = if request_number == 0 {
+                redirect.as_bytes().to_vec()
+            } else {
+                with_body(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 40\r\nConnection: close\r\n\r\n",
+                    br#"{"messages":[{"id":"wamid.redirected"}]}"#,
+                )
+            };
+            let _ = socket.write_all(&response).await;
+            let _ = socket.shutdown().await;
+        }
+    });
+    (base, accepted)
+}
+
 /// Glues a response head (status line plus headers) to a body.
 fn with_body(head: &str, body: &[u8]) -> Vec<u8> {
     let mut response = head.as_bytes().to_vec();
@@ -263,6 +311,42 @@ async fn a_non_2xx_status_is_returned_not_turned_into_an_error() {
         .unwrap();
     assert_eq!(response.status(), 503);
     assert!(!response.is_success());
+}
+
+#[tokio::test]
+async fn redirects_on_post_are_surfaced_and_never_followed() {
+    for status in [301, 307] {
+        let (base, accepted) = serve_redirect_once(status).await;
+        let client = WhatsAppClient::new("106540352242922", "EAAG-test", ReqwestTransport::new())
+            .with_base_url(&base)
+            .with_retry(
+                RetryPolicy::new(5)
+                    .with_base_delay(Duration::ZERO)
+                    .with_max_delay(Duration::ZERO),
+            );
+
+        let error = client
+            .send_text("4915112345678", "must not be redirected")
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(error, Error::Api { status: actual, .. } if actual == status),
+            "the original {status} must surface as a typed error: {error:?}"
+        );
+        assert_eq!(
+            error.status(),
+            Some(status),
+            "the redirect status must not be lost"
+        );
+        assert!(!error.is_retryable(), "a redirect is terminal");
+        assert!(!error.is_ambiguous(), "redirects are not followed");
+        assert_eq!(
+            accepted.load(Ordering::SeqCst),
+            1,
+            "a {status} response to a POST must not create a second request"
+        );
+    }
 }
 
 #[tokio::test]

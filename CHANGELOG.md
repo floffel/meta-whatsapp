@@ -243,6 +243,11 @@ of the README.
   `download_media` at the default. Closes #11.
 
 ### Fixed
+- `ReqwestTransport` no longer follows HTTP redirects. A `301`/`302` could have
+  rewritten a send into a `GET`, and a `307`/`308` could have replayed the
+  mutating request, both below the delivery contract. The bundled client now
+  uses `reqwest::redirect::Policy::none()` and surfaces the original `3xx` as
+  `Error::Api`. Closes #44.
 - `WebhookVerifier::verify` accepted an uppercased digest (`sha256=AB12…`): it
   stripped the `sha256=` prefix and hex-decoded the rest, and `hex::decode`
   takes uppercase, so a header reached `Ok(())` that `sign()` can never produce

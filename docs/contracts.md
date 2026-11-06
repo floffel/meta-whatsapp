@@ -122,6 +122,12 @@ Secondary sources — the developer reference pages the spec links to:
   `TransportPhase::AfterWrite`: the request may have taken effect, so a POST is
   surfaced as ambiguous and never retried automatically. A connection timeout
   is `BeforeWrite` and safe to retry.
+* **Transport redirects are disabled.** `ReqwestTransport` uses
+  `reqwest::redirect::Policy::none()`. The documented Graph endpoints are
+  absolute URLs on one host and do not redirect; following a `3xx` could replay
+  a mutating POST (`307`/`308`) or turn it into a GET (`301`/`302`). The original
+  `3xx` is surfaced as `Error::Api`, so the retry layer sees one request and one
+  terminal response.
 * **Commerce numbers are read permissively, never guessed.** An inbound order
   `quantity` or `item_price` is accepted as a JSON number or as a plain decimal
   string; a member that is neither (a `NaN`, a negative price, an object) stays

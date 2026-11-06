@@ -71,12 +71,18 @@ therefore automates only the retries that cannot duplicate anything:
 | DNS / connect / TLS failure (before the write) | retried | retried |
 | 5xx | **not retried** → `Error::Ambiguous` | retried with backoff |
 | Timeout or reset after the write | **not retried** → `Error::Ambiguous` | retried |
+| 3xx redirect | terminal, original status surfaced | terminal, original status surfaced |
 | Other 4xx | terminal | terminal |
 
 `deregister` is the one `DELETE` in the table's left column: deregistering twice is a
 state change the caller has to see, so it overrides the verb rule
 (`Repeatability::of_method`) and is treated as non-idempotent, exactly like
 `register` and `set_two_step_verification_pin`.
+
+`ReqwestTransport` uses `reqwest::redirect::Policy::none()`. Graph endpoints do
+not legitimately redirect, and following one could replay a mutating `POST`
+(307/308) or silently rewrite it as a `GET` (301/302). A `3xx` therefore reaches
+the client unchanged and surfaces as `Error::Api` with its original status.
 
 `Error::Ambiguous` means *the message may or may not have been delivered*:
 `is_retryable()` is `false`, `is_ambiguous()` is `true`, `status()` carries the
@@ -374,6 +380,9 @@ with a token the API just rejected.
 * `ReqwestTransport` classifies `reqwest` failures by phase: `is_connect()` is
   "before the write" (retryable), a timeout or body/decode error is "after the
   write" (ambiguous for a send), and anything else is terminal.
+* Redirects are never followed: a `3xx` is surfaced as `Error::Api` with the
+  original status, so the request is neither replayed nor rewritten underneath
+  the retry layer.
 * A response body is capped at `DEFAULT_MAX_RESPONSE_BYTES` (100 MiB, exactly
   `MAX_DOCUMENT_BYTES`, so `download_media` still works for the largest accepted
   upload) and read chunk by chunk. A `Content-Length` that already announces

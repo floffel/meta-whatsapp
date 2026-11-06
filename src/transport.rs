@@ -503,7 +503,9 @@ pub trait Transport {
 /// only up to [`DEFAULT_MAX_RESPONSE_BYTES`], and the ceiling is enforced while
 /// the body streams, so a misbehaving endpoint cannot make the process allocate
 /// without bound; use [`ReqwestTransport::with_max_response_bytes`] to tighten
-/// it per client.
+/// it per client. HTTP redirects are not followed: a `3xx` is returned to the
+/// client as the original status, so a mutating `POST` is never replayed or
+/// rewritten into a `GET` underneath the delivery contract.
 ///
 /// ```no_run
 /// # #[cfg(feature = "http")]
@@ -597,6 +599,12 @@ impl Default for ReqwestTransport {
 impl ReqwestTransport {
     /// Creates a transport with rustls, the default request and connect
     /// deadlines, and the default [`DEFAULT_MAX_RESPONSE_BYTES`] ceiling.
+    ///
+    /// Redirects are disabled with `reqwest::redirect::Policy::none()`. Graph
+    /// endpoints do not legitimately redirect, and following one could replay
+    /// a mutating `POST` (307/308) or silently turn it into a `GET` (301/302)
+    /// after the transport had already considered the request delivered. A
+    /// `3xx` is therefore surfaced unchanged for the client to reject.
     ///
     /// ```rust
     /// # #[cfg(feature = "http")]
@@ -739,7 +747,8 @@ impl ReqwestTransport {
 }
 
 /// Builds a client whose deadlines are explicit rather than reqwest's
-/// no-timeout default.
+/// no-timeout default, and whose redirect policy preserves the one-request
+/// delivery contract.
 ///
 /// The bundled constructor is infallible, like `reqwest::Client::new`; a TLS
 /// backend or resolver that cannot initialize is a process configuration
@@ -749,8 +758,9 @@ fn build_client(request_timeout: Duration, connect_timeout: Duration) -> reqwest
     reqwest::Client::builder()
         .timeout(request_timeout)
         .connect_timeout(connect_timeout)
+        .redirect(reqwest::redirect::Policy::none())
         .build()
-        .expect("the reqwest client with protocol deadlines must build")
+        .expect("the reqwest client with protocol deadlines and no redirects must build")
 }
 
 #[cfg(feature = "http")]
