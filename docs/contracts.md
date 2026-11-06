@@ -114,6 +114,14 @@ Secondary sources — the developer reference pages the spec links to:
   shape for `status`: a string is parsed, `null` becomes the default unknown,
   anything else is kept as its raw JSON text. Failing the whole response on one
   unexpected field value would hide the delivery state the caller asked for.
+* **Transport deadlines are part of the delivery contract.** The bundled
+  `ReqwestTransport` sets a 60-second total request deadline
+  (`DEFAULT_REQUEST_TIMEOUT`) and a 10-second connection deadline
+  (`DEFAULT_CONNECT_TIMEOUT`). A `Request::timeout` overrides the total deadline
+  for that one call. A total timeout after the write is
+  `TransportPhase::AfterWrite`: the request may have taken effect, so a POST is
+  surfaced as ambiguous and never retried automatically. A connection timeout
+  is `BeforeWrite` and safe to retry.
 * **Commerce numbers are read permissively, never guessed.** An inbound order
   `quantity` or `item_price` is accepted as a JSON number or as a plain decimal
   string; a member that is neither (a `NaN`, a negative price, an object) stays

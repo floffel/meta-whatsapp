@@ -10,6 +10,12 @@ of the README.
 ## [Unreleased]
 
 ### Added
+- The bundled `ReqwestTransport` now has documented 60-second total and
+  10-second connect deadlines (`DEFAULT_REQUEST_TIMEOUT` and
+  `DEFAULT_CONNECT_TIMEOUT`), with transport-level overrides and the existing
+  per-request timeout taking precedence. A total timeout after the write is
+  classified as `AfterWrite`, surfaced as ambiguous for a send, and never
+  retried automatically.
 - The catalog entry point (follow-up to #19): `CatalogMessage` renders
   `interactive.type = "catalog_message"` — the "view catalog" action carrying
   `thumbnail_product_retailer_id`, the required body (1024 bytes) and an
