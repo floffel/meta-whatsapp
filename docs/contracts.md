@@ -52,6 +52,10 @@ Secondary sources — the developer reference pages the spec links to:
 | `deregister` | `DELETE /{phone-number-id}/deregister` | `/{Version}/{Phone-Number-ID}/deregister` |
 | `set_two_step_verification_pin` | `POST /{phone-number-id}` (body `{"pin":"…"}`) | `/{Version}/{Phone-Number-ID}` |
 | `message_status` | `GET /{phone-number-id}?id={wamid}` | `/{Version}/{Phone-Number-ID}` |
+| `waba_phone_numbers`, `all_waba_phone_numbers` | `GET /{waba-id}/phone_numbers` with optional `fields`, `filtering`, `sort`, `limit`, `after`, `before` | `/{Version}/{WABA-ID}/phone_numbers` |
+| `create_waba_phone_number` | `POST /{waba-id}/phone_numbers` | same |
+| `request_phone_number_code` | `POST /{phone-number-id}/request_code` | `/{Version}/{Phone-Number-ID}/request_code` |
+| `verify_phone_number_code` | `POST /{phone-number-id}/verify_code` | `/{Version}/{Phone-Number-ID}/verify_code` |
 | `blocked_users` | `GET /{phone-number-id}/block_users` | `/{Version}/{Phone-Number-ID}/block_users` |
 | `blocked_users_after`, `blocked_users_with`, `all_blocked_users`, `all_blocked_users_with` | same, plus `?limit=…&after=…` (both optional) | same |
 | `block_users` | `POST /{phone-number-id}/block_users` | same |
@@ -79,6 +83,11 @@ Secondary sources — the developer reference pages the spec links to:
 | `VerificationPin` | two-step verification reference | exactly 6 ASCII digits, checked before allocation. `Debug`/`Display` are fixed redacted text; no getter, no `Default`, equality is constant time. |
 | `RegistrationBackup` | register edge (`backup{password,data}`) | on-premises migration blob; the OpenAPI description does not pin the shape down — see *unverified*, README. |
 | `RegisterRequest` / `TwoStepVerificationRequest` | register edge, two-step reference | register sends `messaging_product` + `pin` (+ optional `backup`); two-step sends `pin` alone. |
+| `PhoneNumberCreateRequest` / `PhoneNumberCreateOutcome` | `PhoneNumberCreateRequest`, `PhoneNumberCreateResponse` | `phone_number` is 7–15 E.164 digits starting with 1–9 and no `+`; `verified_name` is 2–75 characters (with control characters refused locally); optional `cc` is 1–3 digits; `migrate_phone_number` and `preverified_id` are opt-in. The response requires a non-empty `id`. |
+| `WabaPhoneNumber` / `WabaPhoneNumbersPage` | `WhatsAppBusinessAccountPhoneNumber`, `WhatsAppBusinessAccountPhoneNumbersConnection` | The documented response fields are typed; status, certification and platform strings remain strings for forward compatibility. Unknown fields stay in `extra`; `data[]` plus `paging.cursors.after` drives the list walk. |
+| `PhoneNumberQuery` / `PhoneNumberFilter` / `PhoneNumberSort` | parameters of `getWhatsAppBusinessAccountPhoneNumbers` | `limit` is 1–100; `after` and `before` are mutually exclusive; fields use the existing safe field-list grammar; the only documented operator is `EQUAL`; filterable fields are `account_mode`, `messaging_limit_tier` and `is_official_business_account`. Filters are a JSON array encoded as the `filtering` query value. |
+| `RequestCodeRequest` / `RequestCodeOutcome` | `RequestCodeRequest`, `RequestCodeResponse` | Exactly `{code_method: SMS|VOICE, language: ll_CC}`; `success` is required in the response schema and is a boolean here. |
+| `VerificationCode` / `VerifyCodeRequest` / `VerifyCodeOutcome` | `VerifyCodeRequest`, `VerifyCodeResponse` | Exactly six ASCII digits, no getter/default, constant-time equality and redacted `Debug`/`Display`; request body is `{code}`. Response has `success` and optional verified `id`. The code is not the registration PIN. |
 | `WebhookSubscriptions` / `SubscribedApp` | `SubscribedAppsResponse`, `SubscribedApp` | Each entry may wrap the app in `whatsapp_business_api_data` (spec example) — both parse. |
 | `SubscriptionConfig` | `SubscriptionRequest` | `override_callback_uri`, `verify_token`. |
 | `Order` / `OrderItem` | not in the v23 OpenAPI file — parse-side only, from the *Order messages* webhook reference | Inbound `type: "order"` message. `catalog_id` string, optional `text`, `product_items[]` with `product_retailer_id`, `quantity`, `item_price`, `currency`. The reference publishes no maximum for the array, the quantity, the text or the price, so none is capped; `quantity` is a `u32` (number or decimal string) and `item_price` a finite, non-negative number, and a member that is neither stays verbatim in `extra` instead of becoming a zero. `Order::new` / `OrderItem::new` plus `validate` are the mirror image for an application that has to hand a parsed order on: at least one line, `quantity >= 1`, a finite non-negative price, a three-letter ISO-4217 currency — and no ceiling on the item count or on `text`, because the reference publishes none and its own example sends `"text": ""`. Outbound order messages (`order_details`, `order_status`) are interactive and not implemented — issue #20. |
@@ -143,6 +152,12 @@ Secondary sources — the developer reference pages the spec links to:
   `/{app_id}/subscriptions` endpoint implemented by `app_webhook_subscriptions`
   and `subscribe_app_webhooks`. The WABA-level calls still attach or detach the
   app itself.
+* **Phone-number onboarding keeps one registration path.** The WABA create edge
+  provisions and returns the number id; `request_code` and `verify_code` prove
+  ownership; the existing `POST /{phone-number-id}/register` remains the final
+  step. No second WABA-level registration wrapper is added. Both verification
+  codes and PINs are secrets but distinct types, and verification happens before
+  registration as Meta documents.
 * **The address family is reference-only.** `address_message` does not appear in
   the v23.0 OpenAPI description at all — it is modelled from the reference
   page's field table and examples. That page scopes the feature to India and

@@ -48,6 +48,11 @@ use crate::business::{
 use crate::error::{Error, Result};
 use crate::media::{parse_retry_after, validate_media_id, MediaBytes, MediaInfo, MediaUpload};
 use crate::message::{MessageRequest, TextMessage};
+use crate::phone_number::{
+    validate_phone_number_id, PhoneNumberCreateOutcome, PhoneNumberCreateRequest, PhoneNumberQuery,
+    RequestCodeOutcome, RequestCodeRequest, VerifyCodeOutcome, VerifyCodeRequest,
+    WabaPhoneNumbersPage,
+};
 use crate::retry::{Action, Attempt, Repeatability, RetryPolicy};
 use crate::status::{validate_wamid, MessageStatus};
 use crate::subscription::{
@@ -385,6 +390,66 @@ impl<T: Transport> WhatsAppClient<T> {
     #[must_use]
     pub fn templates_url(&self, waba_id: &str) -> String {
         self.url(&format!("{waba_id}/message_templates"))
+    }
+
+    /// The phone-number collection of a business account.
+    ///
+    /// This builder does not validate; [`WhatsAppClient::waba_phone_numbers`]
+    /// does before it calls this helper.
+    ///
+    /// ```
+    /// # use meta_whatsapp::{Result, Transport, WhatsAppClient, transport::{Request, Response}};
+    /// # struct Mock;
+    /// # impl Transport for Mock {
+    /// #     async fn execute(&self, _: Request<'_>) -> Result<Response> {
+    /// #         Ok(Response::new(200, std::iter::empty(), b"{}".to_vec()))
+    /// #     }
+    /// # }
+    /// assert!(WhatsAppClient::new("1", "t", Mock)
+    ///     .waba_phone_numbers_url("102290129340398")
+    ///     .ends_with("/v21.0/102290129340398/phone_numbers"));
+    /// ```
+    #[must_use]
+    pub fn waba_phone_numbers_url(&self, waba_id: &str) -> String {
+        self.url(&format!("{waba_id}/phone_numbers"))
+    }
+
+    /// The `request_code` edge for a phone-number id.
+    ///
+    /// ```
+    /// # use meta_whatsapp::{Result, Transport, WhatsAppClient, transport::{Request, Response}};
+    /// # struct Mock;
+    /// # impl Transport for Mock {
+    /// #     async fn execute(&self, _: Request<'_>) -> Result<Response> {
+    /// #         Ok(Response::new(200, std::iter::empty(), b"{}".to_vec()))
+    /// #     }
+    /// # }
+    /// assert!(WhatsAppClient::new("1", "t", Mock)
+    ///     .request_phone_number_code_url("2")
+    ///     .ends_with("/v21.0/2/request_code"));
+    /// ```
+    #[must_use]
+    pub fn request_phone_number_code_url(&self, phone_number_id: &str) -> String {
+        self.url(&format!("{phone_number_id}/request_code"))
+    }
+
+    /// The `verify_code` edge for a phone-number id.
+    ///
+    /// ```
+    /// # use meta_whatsapp::{Result, Transport, WhatsAppClient, transport::{Request, Response}};
+    /// # struct Mock;
+    /// # impl Transport for Mock {
+    /// #     async fn execute(&self, _: Request<'_>) -> Result<Response> {
+    /// #         Ok(Response::new(200, std::iter::empty(), b"{}".to_vec()))
+    /// #     }
+    /// # }
+    /// assert!(WhatsAppClient::new("1", "t", Mock)
+    ///     .verify_phone_number_code_url("2")
+    ///     .ends_with("/v21.0/2/verify_code"));
+    /// ```
+    #[must_use]
+    pub fn verify_phone_number_code_url(&self, phone_number_id: &str) -> String {
+        self.url(&format!("{phone_number_id}/verify_code"))
     }
 
     /// Sends any typed message and returns the parsed Graph response
@@ -1689,6 +1754,221 @@ impl<T: Transport> WhatsAppClient<T> {
             .execute(Request::post_json(&url, &self.token, &payload))
             .await?;
         SuccessOutcome::from_value(&response.json()?)
+    }
+
+    /// Lists one page of phone numbers under a WABA.
+    ///
+    /// ```
+    /// # use meta_whatsapp::{Result, Transport, WhatsAppClient, transport::{Request, Response}};
+    /// # struct Mock;
+    /// # impl Transport for Mock {
+    /// #     async fn execute(&self, _: Request<'_>) -> Result<Response> {
+    /// #         Ok(Response::new(200, std::iter::empty(), br#"{"data":[]}"#.to_vec()))
+    /// #     }
+    /// # }
+    /// # async fn demo() -> Result<()> {
+    /// let page = WhatsAppClient::new("1", "t", Mock)
+    ///     .waba_phone_numbers("102290129340398", &Default::default())
+    ///     .await?;
+    /// assert!(page.data.is_empty());
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for a malformed WABA id or query, before any URL
+    /// is built; then transport, Graph API and payload errors.
+    pub async fn waba_phone_numbers(
+        &self,
+        waba_id: &str,
+        query: &PhoneNumberQuery,
+    ) -> Result<WabaPhoneNumbersPage> {
+        validate_waba_id(waba_id)?;
+        query.validate()?;
+        let base = self.waba_phone_numbers_url(waba_id);
+        let suffix = query.query_string();
+        let url = if suffix.is_empty() {
+            base
+        } else {
+            format!("{base}?{suffix}")
+        };
+        let response = self.execute(Request::get(&url, &self.token)).await?;
+        WabaPhoneNumbersPage::from_value(&response.json()?)
+    }
+
+    /// Walks the WABA phone-number list until Meta stops paging.
+    ///
+    /// ```
+    /// # use meta_whatsapp::{Result, Transport, WhatsAppClient, transport::{Request, Response}};
+    /// # struct Mock;
+    /// # impl Transport for Mock {
+    /// #     async fn execute(&self, _: Request<'_>) -> Result<Response> {
+    /// #         Ok(Response::new(200, std::iter::empty(), br#"{"data":[]}"#.to_vec()))
+    /// #     }
+    /// # }
+    /// # async fn demo() -> Result<()> {
+    /// let numbers = WhatsAppClient::new("1", "t", Mock)
+    ///     .all_waba_phone_numbers("102290129340398", &Default::default())
+    ///     .await?;
+    /// assert!(numbers.is_empty());
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for a malformed WABA id or query, before the
+    /// first request; then the first failing page's transport, API or payload
+    /// error.
+    pub async fn all_waba_phone_numbers(
+        &self,
+        waba_id: &str,
+        query: &PhoneNumberQuery,
+    ) -> Result<Vec<crate::phone_number::WabaPhoneNumber>> {
+        validate_waba_id(waba_id)?;
+        query.validate()?;
+        let mut page_query = query.clone();
+        let mut seen = query.after.clone();
+        let mut numbers = Vec::new();
+        loop {
+            let page = self.waba_phone_numbers(waba_id, &page_query).await?;
+            let next = page.next_cursor().map(str::to_owned);
+            numbers.extend(page.data);
+            let Some(cursor) = next else { break };
+            if seen.as_deref() == Some(cursor.as_str()) {
+                break;
+            }
+            seen = Some(cursor.clone());
+            page_query.after = Some(cursor);
+            page_query.before = None;
+        }
+        Ok(numbers)
+    }
+
+    /// Creates a phone number under a WABA.
+    ///
+    /// The response id is the phone-number id used by the code, verification
+    /// and registration calls.
+    ///
+    /// ```
+    /// # use meta_whatsapp::{PhoneNumberCreateRequest, Result, Transport, WhatsAppClient, transport::{Request, Response}};
+    /// # struct Mock;
+    /// # impl Transport for Mock {
+    /// #     async fn execute(&self, request: Request<'_>) -> Result<Response> {
+    /// #         assert_eq!(request.method.as_str(), "POST");
+    /// #         Ok(Response::new(200, std::iter::empty(), br#"{"id":"2"}"#.to_vec()))
+    /// #     }
+    /// # }
+    /// # async fn demo() -> Result<()> {
+    /// let request = PhoneNumberCreateRequest::new("16315551000", "My Business")?;
+    /// let created = WhatsAppClient::new("1", "t", Mock)
+    ///     .create_waba_phone_number("102290129340398", &request)
+    ///     .await?;
+    /// assert_eq!(created.id, "2");
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for a malformed WABA id or create request; then
+    /// transport and Graph API errors, with a 5xx or lost answer surfacing as
+    /// [`Error::Ambiguous`].
+    pub async fn create_waba_phone_number(
+        &self,
+        waba_id: &str,
+        request: &PhoneNumberCreateRequest,
+    ) -> Result<PhoneNumberCreateOutcome> {
+        validate_waba_id(waba_id)?;
+        let payload = request.to_json()?;
+        let url = self.waba_phone_numbers_url(waba_id);
+        let response = self
+            .execute(Request::post_json(&url, &self.token, &payload))
+            .await?;
+        PhoneNumberCreateOutcome::from_value(&response.json()?)
+    }
+
+    /// Requests an SMS or voice verification code for a phone number.
+    ///
+    /// ```
+    /// # use meta_whatsapp::{CodeLanguage, CodeMethod, RequestCodeRequest, Result, Transport, WhatsAppClient, transport::{Request, Response}};
+    /// # struct Mock;
+    /// # impl Transport for Mock {
+    /// #     async fn execute(&self, request: Request<'_>) -> Result<Response> {
+    /// #         assert_eq!(request.body_json().unwrap()["code_method"], "SMS");
+    /// #         Ok(Response::new(200, std::iter::empty(), br#"{"success":true}"#.to_vec()))
+    /// #     }
+    /// # }
+    /// # async fn demo() -> Result<()> {
+    /// let request = RequestCodeRequest::new(CodeMethod::Sms, CodeLanguage::new("en_US")?);
+    /// let outcome = WhatsAppClient::new("1", "t", Mock)
+    ///     .request_phone_number_code("2", &request)
+    ///     .await?;
+    /// assert!(outcome.success);
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for a malformed phone-number id; then transport
+    /// and Graph API errors, with a lost POST surfacing as
+    /// [`Error::Ambiguous`].
+    pub async fn request_phone_number_code(
+        &self,
+        phone_number_id: &str,
+        request: &RequestCodeRequest,
+    ) -> Result<RequestCodeOutcome> {
+        validate_phone_number_id(phone_number_id)?;
+        let payload = request.to_json();
+        let url = self.request_phone_number_code_url(phone_number_id);
+        let response = self
+            .execute(Request::post_json(&url, &self.token, &payload))
+            .await?;
+        RequestCodeOutcome::from_value(&response.json()?)
+    }
+
+    /// Verifies the six-digit code sent to a phone number.
+    ///
+    /// ```
+    /// # use meta_whatsapp::{Result, Transport, VerificationCode, VerifyCodeRequest, WhatsAppClient, transport::{Request, Response}};
+    /// # struct Mock;
+    /// # impl Transport for Mock {
+    /// #     async fn execute(&self, request: Request<'_>) -> Result<Response> {
+    /// #         assert!(request.body_json().is_some());
+    /// #         Ok(Response::new(200, std::iter::empty(), br#"{"success":true,"id":"2"}"#.to_vec()))
+    /// #     }
+    /// # }
+    /// # async fn demo() -> Result<()> {
+    /// let request = VerifyCodeRequest::new(&VerificationCode::new("123456")?);
+    /// let outcome = WhatsAppClient::new("1", "t", Mock)
+    ///     .verify_phone_number_code("2", &request)
+    ///     .await?;
+    /// assert_eq!(outcome.id.as_deref(), Some("2"));
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for a malformed phone-number id; then transport
+    /// and Graph API errors, with a lost POST surfacing as
+    /// [`Error::Ambiguous`]. The code itself is validated when the
+    /// [`crate::phone_number::VerificationCode`] is constructed and never
+    /// appears in an error.
+    pub async fn verify_phone_number_code(
+        &self,
+        phone_number_id: &str,
+        request: &VerifyCodeRequest,
+    ) -> Result<VerifyCodeOutcome> {
+        validate_phone_number_id(phone_number_id)?;
+        let payload = request.to_json();
+        let url = self.verify_phone_number_code_url(phone_number_id);
+        let response = self
+            .execute(Request::post_json(&url, &self.token, &payload))
+            .await?;
+        VerifyCodeOutcome::from_value(&response.json()?)
     }
 
     /// Lists the applications subscribed to a WABA's webhooks.

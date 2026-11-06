@@ -150,6 +150,7 @@ impl fmt::Debug for Request<'_> {
 /// Whatever sits under one of these keys is replaced before a body is printed.
 const SECRET_BODY_KEYS: &[&str] = &[
     "pin",
+    "code",
     "password",
     "backup",
     "token",

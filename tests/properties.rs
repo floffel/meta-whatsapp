@@ -12,6 +12,11 @@ use meta_whatsapp::business::{
 use meta_whatsapp::flow::{FLOW_CTA_MAX_CHARS, FLOW_SCREEN_MAX_CHARS, FLOW_TOKEN_MAX_BYTES};
 use meta_whatsapp::media::{validate_media_id, MAX_MEDIA_ID_LEN};
 use meta_whatsapp::message::{CAPTION_MAX_BYTES, HEADER_MAX_CHARS};
+use meta_whatsapp::phone_number::{
+    CodeLanguage, PhoneNumberCreateRequest, PhoneNumberQuery, VerificationCode,
+    PHONE_NUMBER_MAX_DIGITS, PHONE_NUMBER_MIN_DIGITS, VERIFIED_NAME_MAX_CHARS,
+    VERIFIED_NAME_MIN_CHARS,
+};
 use meta_whatsapp::retry::{Action, Attempt, Repeatability};
 use meta_whatsapp::status::{validate_wamid, DeliveryStatus, MessageStatus, MAX_WAMID_LEN};
 use meta_whatsapp::subscription::{validate_waba_id, WebhookSubscriptions};
@@ -1223,5 +1228,61 @@ proptest! {
         prop_assert_eq!(reparsed, order);
         message.order = None;
         prop_assert!(message.order().is_none());
+    }
+
+    /// Every accepted create request renders the exact field types Meta asks
+    /// for, and every rejected digit count is rejected before rendering.
+    #[test]
+    fn create_request_acceptance_is_exactly_the_documented_digit_range(
+        digits in "[1-9]{0,20}",
+    ) {
+        let request = PhoneNumberCreateRequest::new(digits.clone(), "My Business");
+        let expected = (PHONE_NUMBER_MIN_DIGITS..=PHONE_NUMBER_MAX_DIGITS).contains(&digits.len());
+        prop_assert_eq!(request.is_ok(), expected);
+        if let Ok(request) = request {
+            let body = request.to_json()?;
+            prop_assert_eq!(body["phone_number"].as_str().map(str::len), Some(digits.len()));
+            prop_assert!(body["verified_name"].is_string());
+        }
+    }
+
+    /// The business name limit is character-based. Exactly the documented
+    /// minimum and maximum are accepted, and one outside either edge is not.
+    #[test]
+    fn verified_name_acceptance_is_character_based(name in ".{0,100}") {
+        let chars = name.chars().count();
+        let no_controls = !name.chars().any(char::is_control);
+        let request = PhoneNumberCreateRequest::new("16315551000", name);
+        let expected = (VERIFIED_NAME_MIN_CHARS..=VERIFIED_NAME_MAX_CHARS).contains(&chars)
+            && no_controls;
+        prop_assert_eq!(request.is_ok(), expected);
+    }
+
+    /// Cursor values survive the query string and decode back byte-for-byte.
+    #[test]
+    fn phone_number_cursors_are_percent_encoded(cursor in "[ -~]{1,64}") {
+        prop_assume!(!cursor.chars().any(char::is_control));
+        let query = PhoneNumberQuery::new().after(cursor.clone());
+        let rendered = query.query_string();
+        let encoded = rendered.strip_prefix("after=").ok_or_else(|| TestCaseError::fail("after is first"))?;
+        let decoded = percent_decode_str(encoded).decode_utf8()?;
+        prop_assert_eq!(decoded, cursor.as_str());
+    }
+
+    /// No six-digit ASCII string is rejected and no other length is accepted.
+    #[test]
+    fn verification_codes_are_exactly_six_digits(value in "[0-9A-Za-z]{0,10}") {
+        let expected = value.len() == 6 && value.bytes().all(|byte| byte.is_ascii_digit());
+        prop_assert_eq!(VerificationCode::new(&value).is_ok(), expected);
+    }
+
+    /// The language grammar is exact: lowercase-lowercase-'_'-uppercase-uppercase.
+    #[test]
+    fn code_languages_are_exactly_ll_cc(value in "[A-Za-z_]{0,8}") {
+        let expected = value.len() == 5
+            && value.as_bytes()[..2].iter().all(u8::is_ascii_lowercase)
+            && value.as_bytes()[2] == b'_'
+            && value.as_bytes()[3..].iter().all(u8::is_ascii_uppercase);
+        prop_assert_eq!(CodeLanguage::new(value.clone()).is_ok(), expected);
     }
 }

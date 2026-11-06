@@ -105,6 +105,7 @@ pub mod error;
 pub mod flow;
 pub mod media;
 pub mod message;
+pub mod phone_number;
 pub mod retry;
 pub mod status;
 pub mod subscription;
@@ -138,6 +139,13 @@ pub use message::{
     LocationMessage, MessageBody, MessageRequest, MultiProductMessage, PhoneType, ProductItem,
     ProductSection, ReactionMessage, RecipientType, ReplyButton, SingleProductMessage,
     StickerMessage, TextMessage, UrlType, VideoMessage,
+};
+pub use phone_number::{
+    validate_phone_number_id, CodeLanguage, CodeMethod, PhoneNumberCreateOutcome,
+    PhoneNumberCreateRequest, PhoneNumberFilter, PhoneNumberFilterField, PhoneNumberFilterOperator,
+    PhoneNumberFilterValue, PhoneNumberQuery, PhoneNumberSort, RequestCodeOutcome,
+    RequestCodeRequest, VerificationCode, VerifyCodeOutcome, VerifyCodeRequest, WabaPhoneNumber,
+    WabaPhoneNumbersPage,
 };
 pub use retry::{Action, Attempt, Repeatability, RetryPolicy};
 pub use status::{validate_wamid, DeliveryStatus, MessageStatus, MAX_WAMID_LEN};

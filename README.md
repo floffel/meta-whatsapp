@@ -293,6 +293,41 @@ Account administration for the number the client is bound to:
 | `block_users` | `POST /{phone_number_id}/block_users` | `BlockOutcome` (`added_users`) |
 | `unblock_users` | `DELETE /{phone_number_id}/block_users` (ids in the body) | `BlockOutcome` (`removed_users`) |
 
+### WABA phone numbers and onboarding
+
+The client is bound to one phone number for sending, but onboarding starts at
+the WhatsApp Business Account. These calls cover the documented sequence up to
+the existing `register` call:
+
+| Call | Endpoint | Returns |
+| --- | --- | --- |
+| `create_waba_phone_number(waba_id, request)` | `POST /{waba_id}/phone_numbers` | `PhoneNumberCreateOutcome` (`id`) |
+| `waba_phone_numbers(waba_id, query)` | `GET /{waba_id}/phone_numbers` | `WabaPhoneNumbersPage` |
+| `all_waba_phone_numbers(waba_id, query)` | same, cursor after cursor | `Vec<WabaPhoneNumber>` |
+| `request_phone_number_code(phone_number_id, request)` | `POST /{phone_number_id}/request_code` | `RequestCodeOutcome` |
+| `verify_phone_number_code(phone_number_id, request)` | `POST /{phone_number_id}/verify_code` | `VerifyCodeOutcome` (`id`) |
+| `register(pin)` | `POST /{phone_number_id}/register` | the final onboarding step |
+
+The normal flow is create → request code (`SMS` or `VOICE`, plus an `ll_CC`
+language) → verify code → bind a new client to the returned number id → register
+with the two-step PIN. The verification code and the registration PIN are
+separate six-digit values: the former proves ownership of the phone number, and
+the latter is chosen for the account. `PhoneNumberCreateRequest` takes E.164
+digits without `+` (7–15 digits, first digit 1–9), a 2–75 character verified
+name, and optional dialing code, migration flag and pre-verified id.
+`PhoneNumberQuery` carries fields, documented `EQUAL` filters, all four sort
+values, and `limit` 1–100 with either `after` or `before`; all query values are
+checked and percent-encoded before a URL is built. The whole-list walk stops at
+a missing cursor and at the cursor that produced the current page.
+
+`VerificationCode` is distinct from the registration PIN and is also a secret:
+it can only hold six ASCII digits, has no getter or default, redacts `Debug` and
+`Display`, and is redacted from transport body logs. Code requests and
+verification are non-idempotent POSTs, so a 5xx or lost answer is
+`Error::Ambiguous`, never an automatic re-send. Token handling stays inside the
+client and transport; no onboarding method writes the access token anywhere
+except the authorization header.
+
 The three lifecycle writes take or return a `VerificationPin`: a value that only
 exists if it is exactly six ASCII digits, is `Debug`- and `Display`-redacted, has
 no getter and no `Default`, and never appears in an error message. They are
@@ -491,12 +526,6 @@ this section when its issue closes.
   (`InteractiveReply::nfm_reply`; address replies do have a typed decoder,
   `AddressReply`); decrypting and serving flows is a server concern, not a
   client one.
-* **WABA-level phone-number listing / onboarding** (`GET|POST /{waba_id}/phone_numbers`,
-  its `register`, `request_code`) — issue #9. The per-number quality and limits *and*
-  the per-number lifecycle (register / deregister / two-step PIN) *are* covered above;
-  what is left is enumerating and onboarding numbers from the WABA node, where the
-  code request has no per-number PIN.
-
 The only exclusion that does not need an issue is a surface the provider does
 not offer, or has deprecated — and then the README says which, with a link.
 
@@ -522,6 +551,9 @@ The suite has five layers:
   truncated JSON, duplicate keys, unknown event types and 32-task concurrency
   tests. `tests/delivery.rs` pins the retry contract call-by-call;
   `tests/account.rs` covers profile/quality/limits/blocklist/subscriptions/usage;
+  `tests/phone_numbers.rs` covers WABA phone-number list/create, code request and
+  verification: exact wire bodies and queries, paging, redaction, every limit's
+  boundary pair and the retry/ambiguity rules;
   `tests/templates.rs` covers template create/edit/delete: method, path, body,
   the retry class of each verb and both sides of every template limit;
   `tests/address.rs` covers the address form's exact wire shape, its limits with
