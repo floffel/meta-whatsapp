@@ -10,6 +10,14 @@ of the README.
 ## [Unreleased]
 
 ### Added
+- Flow JSON asset uploads (#27): `FlowAssetUpload` and
+  `FlowAssetUploadResponse` model `POST /{flow-id}/assets`. The typed upload
+  fixes Meta's required `FLOW_JSON` asset type and `flow.json` filename,
+  validates the Flow id and 10 MiB payload before the wire, and sends exact
+  multipart bytes through the transport. The response keeps `success`,
+  Meta's typed validation diagnostics and unknown fields, and `is_valid`
+  distinguishes a clean document from one Meta accepted with diagnostics. A 5xx
+  is non-idempotent and surfaces as `Error::Ambiguous`.
 - Flow get and preview reads (#29): `FlowGetRequest` and `FlowPreviewRequest`
   validate the Flow id and query inputs before the wire, then
   `WhatsAppClient::flow` and `WhatsAppClient::flow_preview` decode Meta's

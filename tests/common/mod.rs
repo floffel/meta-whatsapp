@@ -28,6 +28,13 @@ pub enum Body {
         /// Encoded body.
         bytes: Vec<u8>,
     },
+    /// A pre-encoded body plus its exact content type.
+    Bytes {
+        /// Full `Content-Type` header value.
+        content_type: String,
+        /// Encoded body.
+        bytes: Vec<u8>,
+    },
 }
 
 /// One recorded call.
@@ -159,6 +166,13 @@ impl Transport for MockTransport {
                     bytes,
                 }
             }
+            RequestBody::Bytes {
+                content_type,
+                bytes,
+            } => Body::Bytes {
+                content_type: content_type.to_string(),
+                bytes: bytes.to_vec(),
+            },
             _ => Body::Empty,
         };
 

@@ -484,7 +484,7 @@ pub(crate) fn encode_multipart(boundary: &str, upload: &MediaUpload) -> Vec<u8> 
 
 /// A boundary that cannot appear in the payload: it hashes the payload *and* a
 /// process-wide counter, so identical uploads still get distinct boundaries.
-fn next_boundary(data: &[u8]) -> String {
+pub(crate) fn next_boundary(data: &[u8]) -> String {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     let mut hasher = Sha256::new();

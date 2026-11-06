@@ -63,6 +63,49 @@ async fn serve_bytes(response: Vec<u8>) -> String {
     format!("http://{address}")
 }
 
+/// Serves one request, returning both the base URL and the bytes the server
+/// received. The request body is complete once the declared `Content-Length`
+/// has arrived.
+async fn serve_capturing_request(response: Vec<u8>) -> (String, tokio::task::JoinHandle<Vec<u8>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let task = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 1024];
+        loop {
+            let read = socket.read(&mut buffer).await.unwrap();
+            assert_ne!(
+                read, 0,
+                "the client closed before sending the whole request"
+            );
+            request.extend_from_slice(&buffer[..read]);
+
+            let Some(head_end) = request.windows(4).position(|window| window == b"\r\n\r\n") else {
+                continue;
+            };
+            let head = String::from_utf8_lossy(&request[..head_end]);
+            let content_length = head
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().unwrap())
+                })
+                .expect("the multipart POST has a Content-Length");
+            if request.len() >= head_end + 4 + content_length {
+                break;
+            }
+        }
+
+        let _ = socket.write_all(&response).await;
+        let _ = socket.flush().await;
+        let _ = socket.shutdown().await;
+        request
+    });
+    (format!("http://{address}"), task)
+}
+
 /// Accepts each request and reads its head, then keeps the socket open without
 /// answering. Returns the base URL and the number of accepted connections.
 async fn serve_silently() -> (String, Arc<AtomicUsize>) {
@@ -296,6 +339,50 @@ async fn a_real_response_is_mapped_to_status_headers_and_body() {
     assert_eq!(response.json().unwrap()["ok"], true);
     assert!(response.is_success());
     assert!(response.business_use_case_usage().is_none());
+}
+
+#[tokio::test]
+async fn a_pre_encoded_body_is_forwarded_with_its_exact_content_type_and_bytes() {
+    let response_body = br#"{"success":true,"validation_errors":[]}"#;
+    let response = with_body(
+        &format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            response_body.len()
+        ),
+        response_body,
+    );
+    let (base, server) = serve_capturing_request(response).await;
+    let content_type = "multipart/form-data; boundary=meta-test-boundary";
+    let body = b"--meta-test-boundary\r\nContent-Disposition: form-data; name=\"asset_type\"\r\n\r\nFLOW_JSON\r\n--meta-test-boundary--\r\n";
+
+    let response = ReqwestTransport::new()
+        .execute(Request::post_bytes(
+            &format!("{base}/flow-1/assets"),
+            "EAAG-test",
+            content_type,
+            body,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    assert_eq!(response.json().unwrap()["success"], true);
+
+    let request = server.await.unwrap();
+    let head_end = request
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .unwrap();
+    let head = String::from_utf8_lossy(&request[..head_end]);
+    assert!(
+        head.starts_with("POST /flow-1/assets HTTP/1.1\r\n"),
+        "{head}"
+    );
+    assert!(
+        head.lines()
+            .any(|line| line.eq_ignore_ascii_case(&format!("content-type: {content_type}"))),
+        "{head}"
+    );
+    assert_eq!(&request[head_end + 4..], body);
 }
 
 #[tokio::test]

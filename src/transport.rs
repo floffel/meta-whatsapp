@@ -74,6 +74,16 @@ pub enum RequestBody<'a> {
     Json(&'a Value),
     /// `multipart/form-data`, encoded by [`MediaUpload::encode`].
     Multipart(&'a MediaUpload),
+    /// A pre-encoded body with its exact `Content-Type`.
+    ///
+    /// This is used for multipart documents that are not media uploads. The
+    /// caller owns the encoding; the transport only forwards the bytes.
+    Bytes {
+        /// Full `Content-Type` header value, including multipart boundaries.
+        content_type: &'a str,
+        /// Encoded request body.
+        bytes: &'a [u8],
+    },
 }
 
 impl fmt::Debug for RequestBody<'_> {
@@ -88,6 +98,14 @@ impl fmt::Debug for RequestBody<'_> {
                 .field("filename", &upload.filename)
                 .field("mime_type", &upload.mime_type)
                 .field("len", &upload.data.len())
+                .finish(),
+            Self::Bytes {
+                content_type,
+                bytes,
+            } => f
+                .debug_struct("Bytes")
+                .field("content_type", content_type)
+                .field("len", &bytes.len())
                 .finish(),
         }
     }
@@ -243,6 +261,34 @@ impl<'a> Request<'a> {
             token,
             timeout: None,
             body: RequestBody::Multipart(upload),
+        }
+    }
+
+    /// A POST with a pre-encoded body and an explicit `Content-Type`.
+    ///
+    /// ```
+    /// use meta_whatsapp::transport::{Request, RequestBody};
+    ///
+    /// let body = b"hello";
+    /// let request = Request::post_bytes("https://x.test/a", "t", "text/plain", body);
+    /// assert!(matches!(request.body, RequestBody::Bytes { bytes, .. } if bytes == body));
+    /// ```
+    #[must_use]
+    pub fn post_bytes(
+        url: &'a str,
+        token: &'a str,
+        content_type: &'a str,
+        bytes: &'a [u8],
+    ) -> Self {
+        Self {
+            method: Method::Post,
+            url,
+            token,
+            timeout: None,
+            body: RequestBody::Bytes {
+                content_type,
+                bytes,
+            },
         }
     }
 
@@ -785,6 +831,12 @@ impl Transport for ReqwestTransport {
                     .header(reqwest::header::CONTENT_TYPE, content_type)
                     .body(bytes)
             }
+            RequestBody::Bytes {
+                content_type,
+                bytes,
+            } => builder
+                .header(reqwest::header::CONTENT_TYPE, content_type)
+                .body(bytes.to_vec()),
         };
 
         let mut response = builder

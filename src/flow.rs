@@ -90,6 +90,30 @@ pub const FLOW_SCREEN_MAX_CHARS: usize = 64;
 /// ```
 pub const FLOW_ID_MAX_BYTES: usize = 256;
 
+/// The only filename Meta accepts for a Flow JSON asset.
+///
+/// ```
+/// use meta_whatsapp::flow::FLOW_JSON_FILENAME;
+/// assert_eq!(FLOW_JSON_FILENAME, "flow.json");
+/// ```
+pub const FLOW_JSON_FILENAME: &str = "flow.json";
+
+/// The only Flow asset type this endpoint accepts.
+///
+/// ```
+/// use meta_whatsapp::flow::FLOW_ASSET_TYPE;
+/// assert_eq!(FLOW_ASSET_TYPE, "FLOW_JSON");
+/// ```
+pub const FLOW_ASSET_TYPE: &str = "FLOW_JSON";
+
+/// Maximum size of a Flow JSON asset, in bytes (10 MiB).
+///
+/// ```
+/// use meta_whatsapp::flow::FLOW_JSON_MAX_BYTES;
+/// assert_eq!(FLOW_JSON_MAX_BYTES, 10 * 1024 * 1024);
+/// ```
+pub const FLOW_JSON_MAX_BYTES: usize = 10 * 1024 * 1024;
+
 /// Field path reported when a screen id is refused.
 const SCREEN_FIELD: &str = "interactive.action.parameters.flow_action_payload.screen";
 
@@ -209,6 +233,235 @@ pub fn validate_flow_id(flow_id: &str) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+/// A Flow JSON asset ready to upload to `POST /{flow_id}/assets`.
+///
+/// Construction validates the Flow id and payload size. The filename and
+/// asset type are fixed by the API, so neither can be set to an unsupported
+/// value.
+///
+/// ```
+/// use meta_whatsapp::flow::FlowAssetUpload;
+///
+/// let upload = FlowAssetUpload::new("1234567890", br#"{"version":"5.0"}"#.to_vec())?;
+/// assert_eq!(upload.flow_id(), "1234567890");
+/// assert_eq!(upload.len(), 17);
+/// # Ok::<(), meta_whatsapp::Error>(())
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FlowAssetUpload {
+    flow_id: String,
+    flow_json: Vec<u8>,
+}
+
+impl FlowAssetUpload {
+    /// Validates a Flow id and JSON payload.
+    ///
+    /// ```
+    /// use meta_whatsapp::flow::FlowAssetUpload;
+    ///
+    /// assert!(FlowAssetUpload::new("flow-1", b"{}".to_vec()).is_ok());
+    /// assert!(FlowAssetUpload::new("flow-1", Vec::new()).is_err());
+    /// # Ok::<(), meta_whatsapp::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for a malformed Flow id or an empty/oversized
+    /// payload. Meta's schema validation is left to the service, whose answer
+    /// is represented by [`FlowAssetUploadResponse::validation_errors`].
+    pub fn new(flow_id: impl Into<String>, flow_json: impl Into<Vec<u8>>) -> Result<Self> {
+        let upload = Self {
+            flow_id: flow_id.into(),
+            flow_json: flow_json.into(),
+        };
+        upload.validate()?;
+        Ok(upload)
+    }
+
+    /// The Flow that receives the asset.
+    ///
+    /// ```
+    /// use meta_whatsapp::flow::FlowAssetUpload;
+    /// assert_eq!(FlowAssetUpload::new("42", b"{}".to_vec())?.flow_id(), "42");
+    /// # Ok::<(), meta_whatsapp::Error>(())
+    /// ```
+    #[must_use]
+    pub fn flow_id(&self) -> &str {
+        &self.flow_id
+    }
+
+    /// The raw Flow JSON bytes.
+    ///
+    /// ```
+    /// use meta_whatsapp::flow::FlowAssetUpload;
+    /// assert_eq!(FlowAssetUpload::new("42", b"{}".to_vec())?.flow_json(), b"{}");
+    /// # Ok::<(), meta_whatsapp::Error>(())
+    /// ```
+    #[must_use]
+    pub fn flow_json(&self) -> &[u8] {
+        &self.flow_json
+    }
+
+    /// Length of the Flow JSON payload in bytes.
+    ///
+    /// ```
+    /// use meta_whatsapp::flow::FlowAssetUpload;
+    /// assert_eq!(FlowAssetUpload::new("42", b"{}".to_vec())?.len(), 2);
+    /// # Ok::<(), meta_whatsapp::Error>(())
+    /// ```
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.flow_json.len()
+    }
+
+    /// Whether the payload is empty. Always `false` after validation.
+    ///
+    /// ```
+    /// use meta_whatsapp::flow::FlowAssetUpload;
+    /// assert!(!FlowAssetUpload::new("42", b"{}".to_vec())?.is_empty());
+    /// # Ok::<(), meta_whatsapp::Error>(())
+    /// ```
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.flow_json.is_empty()
+    }
+
+    /// Re-checks the invariants enforced by [`FlowAssetUpload::new`].
+    ///
+    /// ```
+    /// use meta_whatsapp::flow::FlowAssetUpload;
+    /// assert!(FlowAssetUpload::new("42", b"{}".to_vec())?.validate().is_ok());
+    /// # Ok::<(), meta_whatsapp::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// See [`FlowAssetUpload::new`].
+    pub fn validate(&self) -> Result<()> {
+        validate_flow_id(&self.flow_id)?;
+        if self.flow_json.is_empty() {
+            return Err(Error::validation("flow_json", "must not be empty"));
+        }
+        if self.flow_json.len() > FLOW_JSON_MAX_BYTES {
+            return Err(Error::validation(
+                "flow_json",
+                format!(
+                    "{} bytes exceeds the {FLOW_JSON_MAX_BYTES} byte limit",
+                    self.flow_json.len()
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn encode_multipart(&self) -> (String, Vec<u8>) {
+        let boundary = crate::media::next_boundary(&self.flow_json);
+        let mut body = Vec::with_capacity(self.flow_json.len() + 512);
+
+        body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+        body.extend_from_slice(
+            format!(
+                "Content-Disposition: form-data; name=\"asset_type\"\r\n\r\n{FLOW_ASSET_TYPE}\r\n"
+            )
+            .as_bytes(),
+        );
+        body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+        body.extend_from_slice(
+            format!(
+                "Content-Disposition: form-data; name=\"name\"\r\n\r\n{FLOW_JSON_FILENAME}\r\n"
+            )
+            .as_bytes(),
+        );
+        body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+        body.extend_from_slice(
+            format!(
+                "Content-Disposition: form-data; name=\"file\"; filename=\"{FLOW_JSON_FILENAME}\"\r\nContent-Type: application/json\r\n\r\n"
+            )
+            .as_bytes(),
+        );
+        body.extend_from_slice(&self.flow_json);
+        body.extend_from_slice(b"\r\n");
+        body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+
+        (format!("multipart/form-data; boundary={boundary}"), body)
+    }
+}
+
+/// Meta's answer to a Flow JSON asset upload.
+///
+/// The documented response is `{success, validation_errors}`, not an upload
+/// handle or media id. `success` can be `true` while validation errors are
+/// present, so call [`FlowAssetUploadResponse::is_valid`] when publishing.
+///
+/// ```
+/// use meta_whatsapp::flow::FlowAssetUploadResponse;
+///
+/// let response = FlowAssetUploadResponse::from_value(&serde_json::json!({
+///     "success": true,
+///     "validation_errors": []
+/// }))?;
+/// assert!(response.success);
+/// assert!(response.is_valid());
+/// # Ok::<(), meta_whatsapp::Error>(())
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct FlowAssetUploadResponse {
+    /// Whether Meta accepted the upload request.
+    #[serde(default)]
+    pub success: bool,
+    /// Diagnostics against the uploaded Flow JSON.
+    #[serde(default)]
+    pub validation_errors: Vec<FlowValidationError>,
+    /// Members this crate does not model, preserved verbatim.
+    #[serde(default, flatten)]
+    pub extra: Map<String, Value>,
+}
+
+impl FlowAssetUploadResponse {
+    /// Decodes a 2xx response body.
+    ///
+    /// ```
+    /// use meta_whatsapp::flow::FlowAssetUploadResponse;
+    ///
+    /// let response = FlowAssetUploadResponse::from_value(&serde_json::json!({
+    ///     "success": true,
+    ///     "future_field": 1
+    /// }))?;
+    /// assert_eq!(response.extra["future_field"], 1);
+    /// # Ok::<(), meta_whatsapp::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Json`] when the body is malformed or not an object.
+    pub fn from_value(value: &Value) -> Result<Self> {
+        serde_json::from_value(value.clone()).map_err(Error::from)
+    }
+
+    /// Whether the upload succeeded and produced no validation diagnostics.
+    ///
+    /// ```
+    /// use meta_whatsapp::flow::FlowAssetUploadResponse;
+    ///
+    /// let clean = FlowAssetUploadResponse::from_value(&serde_json::json!({
+    ///     "success": true,
+    ///     "validation_errors": []
+    /// }))?;
+    /// assert!(clean.is_valid());
+    /// let invalid = FlowAssetUploadResponse::from_value(&serde_json::json!({
+    ///     "success": true,
+    ///     "validation_errors": [{}]
+    /// }))?;
+    /// assert!(!invalid.is_valid());
+    /// # Ok::<(), meta_whatsapp::Error>(())
+    /// ```
+    #[must_use]
+    pub fn is_valid(&self) -> bool {
+        self.success && self.validation_errors.is_empty()
+    }
 }
 
 /// Request for `GET /{Flow-ID}`.

@@ -46,7 +46,10 @@ use crate::business::{
     PHONE_NUMBER_FIELDS,
 };
 use crate::error::{Error, Result};
-use crate::flow::{Flow, FlowGetRequest, FlowPreviewRequest, FlowPreviewResponse};
+use crate::flow::{
+    Flow, FlowAssetUpload, FlowAssetUploadResponse, FlowGetRequest, FlowPreviewRequest,
+    FlowPreviewResponse,
+};
 use crate::media::{parse_retry_after, validate_media_id, MediaBytes, MediaInfo, MediaUpload};
 use crate::message::{MessageRequest, TextMessage};
 use crate::phone_number::{
@@ -679,6 +682,57 @@ impl<T: Transport> WhatsAppClient<T> {
             .and_then(Value::as_str)
             .map(str::to_string)
             .ok_or_else(|| Error::Payload(format!("upload response carried no id: {json}")))
+    }
+
+    /// Uploads (or replaces) the JSON asset of a WhatsApp Flow.
+    ///
+    /// `POST /{flow_id}/assets` is a multipart request with the fixed asset
+    /// name `flow.json` and asset type `FLOW_JSON`. Meta validates the document
+    /// and returns diagnostics in [`FlowAssetUploadResponse`]; a successful
+    /// request can still need corrections before the Flow is published.
+    ///
+    /// ```
+    /// # use meta_whatsapp::{Result, Transport, WhatsAppClient, transport::{Request, Response}};
+    /// # use meta_whatsapp::flow::FlowAssetUpload;
+    /// # struct Mock;
+    /// # impl Transport for Mock {
+    /// #     async fn execute(&self, request: Request<'_>) -> Result<Response> {
+    /// #         assert!(request.url.ends_with("/123/assets"));
+    /// #         assert_eq!(request.method.as_str(), "POST");
+    /// #         Ok(Response::new(200, std::iter::empty(), br#"{"success":true,"validation_errors":[]}"#.to_vec()))
+    /// #     }
+    /// # }
+    /// # async fn demo() -> Result<()> {
+    /// let client = WhatsAppClient::new("1", "t", Mock);
+    /// let upload = FlowAssetUpload::new("123", br#"{"version":"5.0"}"#.to_vec())?;
+    /// let response = client.upload_flow_asset(&upload).await?;
+    /// assert!(response.is_valid());
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for a malformed Flow id or an empty/oversized
+    /// payload before anything is sent; then transport, Graph API and response
+    /// decoding errors. This is a non-idempotent POST, so a 5xx or lost answer
+    /// surfaces as [`Error::Ambiguous`] and is not retried.
+    pub async fn upload_flow_asset(
+        &self,
+        upload: &FlowAssetUpload,
+    ) -> Result<FlowAssetUploadResponse> {
+        upload.validate()?;
+        let url = self.url(&format!("{}/assets", upload.flow_id()));
+        let (content_type, bytes) = upload.encode_multipart();
+        let response = self
+            .execute(Request::post_bytes(
+                &url,
+                &self.token,
+                &content_type,
+                &bytes,
+            ))
+            .await?;
+        FlowAssetUploadResponse::from_value(&response.json()?)
     }
 
     /// Fetches metadata (including a short-lived URL) for a media id.
