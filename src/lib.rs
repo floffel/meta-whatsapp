@@ -128,8 +128,11 @@ pub use business::{
 pub use client::{SendOutcome, WhatsAppClient, DEFAULT_API_VERSION};
 pub use error::{Error, Result, TransportPhase};
 pub use flow::{
-    validate_screen_data, validate_screen_name, FLOW_CTA_MAX_CHARS, FLOW_MESSAGE_VERSION,
-    FLOW_SCREEN_MAX_CHARS, FLOW_TOKEN_MAX_BYTES,
+    validate_flow_id, validate_screen_data, validate_screen_name, Flow, FlowApplication,
+    FlowGetRequest, FlowHealthEntity, FlowHealthError, FlowHealthStatus, FlowPreviewLink,
+    FlowPreviewRequest, FlowPreviewResponse, FlowStatus, FlowValidationError,
+    FlowValidationPointer, FlowWhatsAppBusinessAccount, FLOW_CTA_MAX_CHARS, FLOW_ID_MAX_BYTES,
+    FLOW_MESSAGE_VERSION, FLOW_SCREEN_MAX_CHARS, FLOW_TOKEN_MAX_BYTES,
 };
 pub use media::{MediaBytes, MediaInfo, MediaRef, MediaUpload};
 pub use message::{
