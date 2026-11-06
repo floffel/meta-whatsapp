@@ -47,8 +47,8 @@ use crate::business::{
 };
 use crate::error::{Error, Result};
 use crate::flow::{
-    Flow, FlowAssetUpload, FlowAssetUploadResponse, FlowGetRequest, FlowPreviewRequest,
-    FlowPreviewResponse,
+    Flow, FlowAssetUpload, FlowAssetUploadResponse, FlowEncryptionPublicKeyRequest,
+    FlowEncryptionPublicKeyResponse, FlowGetRequest, FlowPreviewRequest, FlowPreviewResponse,
 };
 use crate::media::{parse_retry_after, validate_media_id, MediaBytes, MediaInfo, MediaUpload};
 use crate::message::{MessageRequest, TextMessage};
@@ -1430,6 +1430,68 @@ impl<T: Transport> WhatsAppClient<T> {
         );
         let response = self.execute(Request::get(&url, &self.token)).await?;
         FlowPreviewResponse::parse(&response.json()?)
+    }
+
+    /// Fetches the configured Flow data-exchange public key and its signature
+    /// verification status for a phone number.
+    ///
+    /// This is `GET /{phone-number-id}/whatsapp_business_encryption`. Both
+    /// documented members can be selected, or the fields list can be empty to
+    /// use Meta's default. The request's phone-number id is validated before
+    /// the URL is built; this is a read, so a 5xx is safe to retry.
+    ///
+    /// Flow request decryption has no corresponding Graph operation. Meta sends
+    /// encrypted fields to the Flow endpoint configured for the business, and
+    /// that endpoint decrypts them locally with the private half of this key.
+    /// See [`crate::flow::FlowEncryptionPublicKeyResponse`] and
+    /// `docs/contracts.md` for the exact boundary.
+    ///
+    /// ```
+    /// # use meta_whatsapp::{Result, Transport, WhatsAppClient, transport::{Request, Response}};
+    /// use meta_whatsapp::flow::{
+    ///     FlowEncryptionPublicKeyField, FlowEncryptionPublicKeyRequest,
+    ///     FlowPublicKeySignatureStatus,
+    /// };
+    /// # struct Mock;
+    /// # impl Transport for Mock {
+    /// #     async fn execute(&self, request: Request<'_>) -> Result<Response> {
+    /// #         assert_eq!(request.url, "https://graph.facebook.com/v21.0/1234/whatsapp_business_encryption?fields=business_public_key_signature_status");
+    /// #         Ok(Response::new(200, std::iter::empty(), br#"{"business_public_key_signature_status":"VALID"}"#.to_vec()))
+    /// #     }
+    /// # }
+    /// # async fn demo() -> Result<()> {
+    /// let client = WhatsAppClient::new("1234", "t", Mock);
+    /// let request = FlowEncryptionPublicKeyRequest::new("1234")
+    ///     .fields([FlowEncryptionPublicKeyField::SignatureStatus]);
+    /// let response = client.flow_encryption_public_key(&request).await?;
+    /// assert_eq!(
+    ///     response.business_public_key_signature_status,
+    ///     Some(FlowPublicKeySignatureStatus::Valid)
+    /// );
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an invalid phone-number id, before any request;
+    /// then transport, Graph API and decoding errors.
+    pub async fn flow_encryption_public_key(
+        &self,
+        request: &FlowEncryptionPublicKeyRequest,
+    ) -> Result<FlowEncryptionPublicKeyResponse> {
+        request.validate()?;
+        let mut url = self.url(&format!(
+            "{}/whatsapp_business_encryption",
+            request.phone_number_id
+        ));
+        let query = request.query_string();
+        if !query.is_empty() {
+            url.push('?');
+            url.push_str(&query);
+        }
+        let response = self.execute(Request::get(&url, &self.token)).await?;
+        FlowEncryptionPublicKeyResponse::parse(&response.json()?)
     }
 
     /// Lists the blocked users of the bound number — the first page only.

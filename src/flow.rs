@@ -9,11 +9,13 @@
 //! message is checked against and the two validators for the `navigate` payload.
 //!
 //! This module is the round trip of issue #8 plus the read-side Flow management
-//! calls: [`FlowGetRequest`], [`FlowPreviewRequest`] and their typed responses.
-//! The rest of the Flows API lives in its own issues: asset upload (#27) and
-//! the data-exchange encryption endpoints (#28). Serving a flow's
-//! `data_channel_uri` is a server concern; this crate carries the message out
-//! and the reply in.
+//! calls: [`FlowGetRequest`], [`FlowPreviewRequest`],
+//! [`FlowEncryptionPublicKeyRequest`] and their typed responses. Meta's Flow
+//! endpoint decrypts data-exchange requests locally, using the private key that
+//! corresponds to [`FlowEncryptionPublicKeyResponse::business_public_key`]; it
+//! publishes no Graph API operation that decrypts those payloads. Serving a
+//! flow's `data_channel_uri` and performing that local decryption are server
+//! concerns, while this crate carries the message out and the reply in.
 //!
 //! ```
 //! use meta_whatsapp::types::{FlowReply, Message};
@@ -730,6 +732,386 @@ fn validate_date_format(format: Option<&str>) -> Result<()> {
 
 fn encode_query_value(value: &str) -> String {
     crate::template::encode_query_value(value)
+}
+
+/// A field that can be selected from the business-encryption endpoint.
+///
+/// Meta's OpenAPI description lists these two fields for
+/// `GET /{Phone-Number-ID}/whatsapp_business_encryption`.
+///
+/// ```
+/// use meta_whatsapp::flow::FlowEncryptionPublicKeyField;
+///
+/// assert_eq!(
+///     FlowEncryptionPublicKeyField::BusinessPublicKey.as_str(),
+///     "business_public_key"
+/// );
+/// assert_eq!(
+///     FlowEncryptionPublicKeyField::SignatureStatus.as_str(),
+///     "business_public_key_signature_status"
+/// );
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum FlowEncryptionPublicKeyField {
+    /// The PEM-encoded 2048-bit RSA business public key.
+    BusinessPublicKey,
+    /// Whether Meta considers the stored public-key signature valid.
+    SignatureStatus,
+}
+
+impl FlowEncryptionPublicKeyField {
+    /// The field name as Meta spells it on the wire.
+    ///
+    /// ```
+    /// use meta_whatsapp::flow::FlowEncryptionPublicKeyField;
+    ///
+    /// assert_eq!(
+    ///     FlowEncryptionPublicKeyField::SignatureStatus.as_str(),
+    ///     "business_public_key_signature_status"
+    /// );
+    /// ```
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::BusinessPublicKey => "business_public_key",
+            Self::SignatureStatus => "business_public_key_signature_status",
+        }
+    }
+}
+
+impl std::fmt::Display for FlowEncryptionPublicKeyField {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl Serialize for FlowEncryptionPublicKeyField {
+    fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for FlowEncryptionPublicKeyField {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        match String::deserialize(deserializer)?.as_str() {
+            "business_public_key" => Ok(Self::BusinessPublicKey),
+            "business_public_key_signature_status" => Ok(Self::SignatureStatus),
+            other => Err(serde::de::Error::unknown_variant(
+                other,
+                &[
+                    "business_public_key",
+                    "business_public_key_signature_status",
+                ],
+            )),
+        }
+    }
+}
+
+/// Request for `GET /{Phone-Number-ID}/whatsapp_business_encryption`.
+///
+/// An empty [`FlowEncryptionPublicKeyRequest::fields`] list lets Meta return
+/// its defaults. The phone-number id is checked before URL construction, so an
+/// empty or path-like id cannot reach the transport.
+///
+/// ```
+/// use meta_whatsapp::flow::{
+///     FlowEncryptionPublicKeyField, FlowEncryptionPublicKeyRequest,
+/// };
+///
+/// let request = FlowEncryptionPublicKeyRequest::new("106540352242922")
+///     .fields([FlowEncryptionPublicKeyField::BusinessPublicKey]);
+/// assert_eq!(
+///     request.query_string(),
+///     "fields=business_public_key"
+/// );
+/// assert!(request.validate().is_ok());
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FlowEncryptionPublicKeyRequest {
+    /// WhatsApp Business phone-number id whose configured key is requested.
+    pub phone_number_id: String,
+    /// Fields to request; empty means Meta's default field set.
+    pub fields: Vec<FlowEncryptionPublicKeyField>,
+}
+
+impl FlowEncryptionPublicKeyRequest {
+    /// A request for the bound number with Meta's default fields.
+    ///
+    /// ```
+    /// use meta_whatsapp::flow::FlowEncryptionPublicKeyRequest;
+    ///
+    /// let request = FlowEncryptionPublicKeyRequest::new("1234");
+    /// assert_eq!(request.phone_number_id, "1234");
+    /// assert!(request.fields.is_empty());
+    /// ```
+    pub fn new(phone_number_id: impl Into<String>) -> Self {
+        Self {
+            phone_number_id: phone_number_id.into(),
+            fields: Vec::new(),
+        }
+    }
+
+    /// Sets the response fields, in wire order.
+    ///
+    /// ```
+    /// use meta_whatsapp::flow::{
+    ///     FlowEncryptionPublicKeyField, FlowEncryptionPublicKeyRequest,
+    /// };
+    ///
+    /// let request = FlowEncryptionPublicKeyRequest::new("1234").fields([
+    ///     FlowEncryptionPublicKeyField::BusinessPublicKey,
+    ///     FlowEncryptionPublicKeyField::SignatureStatus,
+    /// ]);
+    /// assert_eq!(request.fields.len(), 2);
+    /// ```
+    #[must_use]
+    pub fn fields<I>(mut self, fields: I) -> Self
+    where
+        I: IntoIterator<Item = FlowEncryptionPublicKeyField>,
+    {
+        self.fields = fields.into_iter().collect();
+        self
+    }
+
+    /// Validates the phone-number id before any URL is built.
+    ///
+    /// Meta's OpenAPI path parameter is digits-only. This crate applies its
+    /// existing 32-digit ceiling as a concrete URL bound.
+    ///
+    /// ```
+    /// use meta_whatsapp::flow::FlowEncryptionPublicKeyRequest;
+    ///
+    /// assert!(FlowEncryptionPublicKeyRequest::new("1234").validate().is_ok());
+    /// assert!(FlowEncryptionPublicKeyRequest::new("../me").validate().is_err());
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] naming `phone_number_id` when it is empty, longer
+    /// than 32 bytes, or contains anything other than ASCII digits.
+    pub fn validate(&self) -> Result<()> {
+        crate::phone_number::validate_phone_number_id(&self.phone_number_id)
+    }
+
+    /// Renders the optional `fields` query string without the leading `?`.
+    ///
+    /// ```
+    /// use meta_whatsapp::flow::{
+    ///     FlowEncryptionPublicKeyField, FlowEncryptionPublicKeyRequest,
+    /// };
+    ///
+    /// assert_eq!(
+    ///     FlowEncryptionPublicKeyRequest::new("1234").query_string(),
+    ///     ""
+    /// );
+    /// assert_eq!(
+    ///     FlowEncryptionPublicKeyRequest::new("1234")
+    ///         .fields([
+    ///             FlowEncryptionPublicKeyField::BusinessPublicKey,
+    ///             FlowEncryptionPublicKeyField::SignatureStatus,
+    ///         ])
+    ///         .query_string(),
+    ///     "fields=business_public_key%2Cbusiness_public_key_signature_status"
+    /// );
+    /// ```
+    #[must_use]
+    pub fn query_string(&self) -> String {
+        if self.fields.is_empty() {
+            return String::new();
+        }
+        let joined = self
+            .fields
+            .iter()
+            .map(|field| field.as_str())
+            .collect::<Vec<_>>()
+            .join(",");
+        format!("fields={}", encode_query_value(&joined))
+    }
+}
+
+/// Meta's verification state for the stored business public key.
+///
+/// The documented values are typed. A value Meta adds later is preserved in
+/// [`FlowPublicKeySignatureStatus::Unknown`] rather than making the response
+/// unreadable.
+///
+/// ```
+/// use meta_whatsapp::flow::FlowPublicKeySignatureStatus;
+///
+/// assert_eq!(
+///     FlowPublicKeySignatureStatus::parse("VALID"),
+///     FlowPublicKeySignatureStatus::Valid
+/// );
+/// assert_eq!(
+///     FlowPublicKeySignatureStatus::parse("FUTURE"),
+///     FlowPublicKeySignatureStatus::Unknown("FUTURE".into())
+/// );
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum FlowPublicKeySignatureStatus {
+    /// Meta verified the stored signature.
+    Valid,
+    /// The stored signature does not match the public key.
+    Mismatch,
+    /// A status this crate does not know; the raw value is kept.
+    Unknown(String),
+}
+
+impl Default for FlowPublicKeySignatureStatus {
+    fn default() -> Self {
+        Self::Unknown(String::new())
+    }
+}
+
+impl FlowPublicKeySignatureStatus {
+    /// Parses a status case-insensitively, retaining unknown values.
+    ///
+    /// ```
+    /// use meta_whatsapp::flow::FlowPublicKeySignatureStatus;
+    ///
+    /// assert_eq!(
+    ///     FlowPublicKeySignatureStatus::parse(" mismatch "),
+    ///     FlowPublicKeySignatureStatus::Mismatch
+    /// );
+    /// ```
+    #[must_use]
+    pub fn parse(raw: &str) -> Self {
+        match raw.trim().to_ascii_uppercase().as_str() {
+            "VALID" => Self::Valid,
+            "MISMATCH" => Self::Mismatch,
+            _ => Self::Unknown(raw.trim().to_string()),
+        }
+    }
+
+    /// The status as Meta spells it, or the raw unknown value.
+    ///
+    /// ```
+    /// use meta_whatsapp::flow::FlowPublicKeySignatureStatus;
+    ///
+    /// assert_eq!(FlowPublicKeySignatureStatus::Valid.as_str(), "VALID");
+    /// assert_eq!(
+    ///     FlowPublicKeySignatureStatus::Unknown("FUTURE".into()).as_str(),
+    ///     "FUTURE"
+    /// );
+    /// ```
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Valid => "VALID",
+            Self::Mismatch => "MISMATCH",
+            Self::Unknown(raw) => raw,
+        }
+    }
+}
+
+impl std::fmt::Display for FlowPublicKeySignatureStatus {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl Serialize for FlowPublicKeySignatureStatus {
+    fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for FlowPublicKeySignatureStatus {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        Ok(Self::parse(&raw))
+    }
+}
+
+/// Public-key information returned by the business-encryption endpoint.
+///
+/// The schema marks both fields required, but `fields` can select either one,
+/// so both are optional here. Parsing accepts the flat guide example and the
+/// OpenAPI `{"data":[{...}]}` envelope; members this crate does not model stay
+/// in [`FlowEncryptionPublicKeyResponse::extra`].
+///
+/// ```
+/// use meta_whatsapp::flow::{
+///     FlowEncryptionPublicKeyResponse, FlowPublicKeySignatureStatus,
+/// };
+///
+/// let response = FlowEncryptionPublicKeyResponse::parse(&serde_json::json!({
+///     "data": [{
+///         "business_public_key": "-----BEGIN PUBLIC KEY-----",
+///         "business_public_key_signature_status": "VALID"
+///     }]
+/// }))?;
+/// assert_eq!(
+///     response.business_public_key_signature_status,
+///     Some(FlowPublicKeySignatureStatus::Valid)
+/// );
+/// # Ok::<(), meta_whatsapp::Error>(())
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct FlowEncryptionPublicKeyResponse {
+    /// PEM-encoded RSA public key, when selected.
+    #[serde(default)]
+    pub business_public_key: Option<String>,
+    /// Meta's signature verification status, when selected.
+    #[serde(default)]
+    pub business_public_key_signature_status: Option<FlowPublicKeySignatureStatus>,
+    /// Members this crate does not model, preserved verbatim.
+    #[serde(default, flatten)]
+    pub extra: Map<String, Value>,
+}
+
+impl FlowEncryptionPublicKeyResponse {
+    /// Reads the key information out of a flat or `data[0]`-wrapped response.
+    ///
+    /// ```
+    /// use meta_whatsapp::flow::FlowEncryptionPublicKeyResponse;
+    ///
+    /// assert!(
+    ///     FlowEncryptionPublicKeyResponse::parse(&serde_json::json!({
+    ///         "business_public_key_signature_status": "MISMATCH"
+    ///     }))
+    ///     .is_ok()
+    /// );
+    /// assert!(FlowEncryptionPublicKeyResponse::parse(&serde_json::json!({
+    ///     "data": []
+    /// })).is_err());
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Payload`] when the response is not an object omitting `data`,
+    /// or when `data` is not a non-empty array whose first member is an
+    /// object. [`Error::Json`] when a modeled member has the wrong JSON type.
+    pub fn parse(value: &Value) -> Result<Self> {
+        let candidate = match value {
+            Value::Object(map) => match map.get("data") {
+                Some(Value::Array(entries)) => entries.first().map_or_else(
+                    || Err(Error::Payload("`data` was empty".to_string())),
+                    |entry| {
+                        entry.as_object().map(|_| entry).ok_or_else(|| {
+                            Error::Payload("`data[0]` was not an object".to_string())
+                        })
+                    },
+                )?,
+                Some(_) => {
+                    return Err(Error::Payload(
+                        "`data` was not an array of objects".to_string(),
+                    ))
+                }
+                None => value,
+            },
+            _ => {
+                return Err(Error::Payload(
+                    "expected a JSON object for the Graph API response".to_string(),
+                ))
+            }
+        };
+
+        serde_json::from_value(candidate.clone()).map_err(|source| Error::Json { source })
+    }
 }
 
 /// Lifecycle state of a Flow.

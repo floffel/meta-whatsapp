@@ -6,9 +6,11 @@ mod common;
 
 use common::{client, json_response, Body, Call, MockTransport};
 use meta_whatsapp::flow::{
-    validate_flow_id, validate_screen_data, validate_screen_name, Flow, FlowGetRequest,
-    FlowPreviewRequest, FlowStatus, FLOW_CTA_MAX_CHARS, FLOW_ID_MAX_BYTES, FLOW_MESSAGE_VERSION,
-    FLOW_SCREEN_MAX_CHARS, FLOW_TOKEN_MAX_BYTES,
+    validate_flow_id, validate_screen_data, validate_screen_name, Flow,
+    FlowEncryptionPublicKeyField, FlowEncryptionPublicKeyRequest, FlowEncryptionPublicKeyResponse,
+    FlowGetRequest, FlowPreviewRequest, FlowPublicKeySignatureStatus, FlowStatus,
+    FLOW_CTA_MAX_CHARS, FLOW_ID_MAX_BYTES, FLOW_MESSAGE_VERSION, FLOW_SCREEN_MAX_CHARS,
+    FLOW_TOKEN_MAX_BYTES,
 };
 use meta_whatsapp::transport::Method;
 use meta_whatsapp::{
@@ -689,6 +691,178 @@ async fn flow_preview_keeps_or_invalidates_the_link_as_requested() {
     assert!(calls
         .iter()
         .all(|call| call.method == Method::Get && call.body == Body::Empty));
+}
+
+// ---------------------------------------------------------------------------
+// Flow data-exchange public key.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn flow_encryption_public_key_records_the_flat_documented_round_trip() {
+    let transport = MockTransport::new();
+    transport.push_response(json_response(&json!({
+        "business_public_key": "-----BEGIN PUBLIC KEY-----\nMIIB\n-----END PUBLIC KEY-----",
+        "business_public_key_signature_status": "VALID",
+        "field_added_later": true
+    })));
+    let client = client(transport.clone());
+
+    let response = client
+        .flow_encryption_public_key(&FlowEncryptionPublicKeyRequest::new("106540352242922"))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.business_public_key.as_deref(),
+        Some("-----BEGIN PUBLIC KEY-----\nMIIB\n-----END PUBLIC KEY-----")
+    );
+    assert_eq!(
+        response.business_public_key_signature_status,
+        Some(FlowPublicKeySignatureStatus::Valid)
+    );
+    assert_eq!(response.extra["field_added_later"], true);
+
+    let call = transport.only_call();
+    assert_eq!(call.method, Method::Get);
+    assert_eq!(
+        call.url,
+        "https://graph.facebook.com/v21.0/106540352242922/whatsapp_business_encryption"
+    );
+    assert_eq!(call.body, Body::Empty);
+}
+
+#[tokio::test]
+async fn flow_encryption_public_key_accepts_the_openapi_envelope_and_encodes_fields() {
+    let transport = MockTransport::new();
+    transport.push_response(json_response(&json!({
+        "data": [{
+            "business_public_key": "-----BEGIN PUBLIC KEY-----\nMIIB\n-----END PUBLIC KEY-----",
+            "business_public_key_signature_status": "MISMATCH",
+            "new_member": 42
+        }]
+    })));
+    let client = client(transport.clone());
+    let request = FlowEncryptionPublicKeyRequest::new("106540352242922").fields([
+        FlowEncryptionPublicKeyField::BusinessPublicKey,
+        FlowEncryptionPublicKeyField::SignatureStatus,
+    ]);
+
+    let response = client.flow_encryption_public_key(&request).await.unwrap();
+    assert_eq!(
+        response.business_public_key_signature_status,
+        Some(FlowPublicKeySignatureStatus::Mismatch)
+    );
+    assert_eq!(response.extra["new_member"], 42);
+
+    let call = transport.only_call();
+    assert_eq!(call.method, Method::Get);
+    assert_eq!(
+        call.url,
+        "https://graph.facebook.com/v21.0/106540352242922/whatsapp_business_encryption?fields=business_public_key%2Cbusiness_public_key_signature_status"
+    );
+    assert_eq!(call.body, Body::Empty);
+}
+
+#[test]
+fn public_key_signature_statuses_are_typed_but_forward_compatible() {
+    for (raw, expected) in [
+        ("VALID", FlowPublicKeySignatureStatus::Valid),
+        (" mismatch ", FlowPublicKeySignatureStatus::Mismatch),
+        (
+            "FUTURE_STATUS",
+            FlowPublicKeySignatureStatus::Unknown("FUTURE_STATUS".into()),
+        ),
+    ] {
+        assert_eq!(FlowPublicKeySignatureStatus::parse(raw), expected);
+    }
+}
+
+#[test]
+fn public_key_response_parsing_accepts_both_documented_envelopes() {
+    let flat = FlowEncryptionPublicKeyResponse::parse(&json!({
+        "business_public_key_signature_status": "FUTURE_STATUS"
+    }))
+    .unwrap();
+    assert_eq!(
+        flat.business_public_key_signature_status,
+        Some(FlowPublicKeySignatureStatus::Unknown(
+            "FUTURE_STATUS".into()
+        ))
+    );
+
+    let wrapped = FlowEncryptionPublicKeyResponse::parse(&json!({
+        "data": [{"business_public_key": "key"}]
+    }))
+    .unwrap();
+    assert_eq!(wrapped.business_public_key.as_deref(), Some("key"));
+    assert!(wrapped.business_public_key_signature_status.is_none());
+}
+
+#[test]
+fn public_key_response_errors_name_the_unexpected_envelope_or_member_type() {
+    for malformed in [
+        json!("not an object"),
+        json!({"data": {}}),
+        json!({"data": []}),
+        json!({"data": [42]}),
+    ] {
+        assert!(
+            matches!(
+                FlowEncryptionPublicKeyResponse::parse(&malformed),
+                Err(Error::Payload(_))
+            ),
+            "{malformed} was not rejected as a payload"
+        );
+    }
+
+    for malformed in [
+        json!({"business_public_key": 42}),
+        json!({"business_public_key_signature_status": 42}),
+    ] {
+        let error = FlowEncryptionPublicKeyResponse::parse(&malformed).unwrap_err();
+        assert!(matches!(error, Error::Json { .. }));
+        assert!(std::error::Error::source(&error).is_some());
+    }
+}
+
+#[tokio::test]
+async fn public_key_phone_id_boundary_is_32_digits() {
+    let accepted = "1".repeat(32);
+    let transport = MockTransport::new();
+    transport.push_response(json_response(&json!({})));
+    let accepted_client = client(transport.clone());
+
+    accepted_client
+        .flow_encryption_public_key(&FlowEncryptionPublicKeyRequest::new(&accepted))
+        .await
+        .unwrap();
+    let call = transport.only_call();
+    assert!(call
+        .url
+        .contains(&format!("/{accepted}/whatsapp_business_encryption")));
+
+    let rejected_transport = MockTransport::new();
+    let rejected_client = client(rejected_transport.clone());
+    for phone_number_id in [
+        String::new(),
+        format!("{accepted}1"),
+        "../me".into(),
+        "1234x".into(),
+        "１２３４".into(),
+    ] {
+        let error = rejected_client
+            .flow_encryption_public_key(&FlowEncryptionPublicKeyRequest::new(phone_number_id))
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            Error::Validation {
+                field: "phone_number_id",
+                ..
+            }
+        ));
+    }
+    assert_eq!(rejected_transport.call_count(), 0);
 }
 
 #[test]
