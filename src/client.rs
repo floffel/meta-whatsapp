@@ -51,7 +51,8 @@ use crate::message::{MessageRequest, TextMessage};
 use crate::retry::{Action, Attempt, Repeatability, RetryPolicy};
 use crate::status::{validate_wamid, MessageStatus};
 use crate::subscription::{
-    validate_waba_id, SubscriptionConfig, SubscriptionState, WebhookSubscriptions,
+    validate_app_id, validate_waba_id, AppSubscriptionState, AppWebhookSubscriptionRequest,
+    AppWebhookSubscriptions, SubscriptionConfig, SubscriptionState, WebhookSubscriptions,
 };
 use crate::template::{
     encode_query_value, percent_encode, validate_template_name, validate_template_owner_id,
@@ -1058,6 +1059,25 @@ impl<T: Transport> WhatsAppClient<T> {
         self.url(&format!("{waba_id}/subscribed_apps"))
     }
 
+    /// The app-level webhook field-subscription endpoint.
+    ///
+    /// ```
+    /// # use meta_whatsapp::{Result, Transport, WhatsAppClient, transport::{Request, Response}};
+    /// # struct Mock;
+    /// # impl Transport for Mock {
+    /// #     async fn execute(&self, _: Request<'_>) -> Result<Response> {
+    /// #         Ok(Response::new(200, std::iter::empty(), b"{}".to_vec()))
+    /// #     }
+    /// # }
+    /// assert!(WhatsAppClient::new("1", "t", Mock)
+    ///     .app_subscriptions_url("1234567890")
+    ///     .ends_with("/v21.0/1234567890/subscriptions"));
+    /// ```
+    #[must_use]
+    pub fn app_subscriptions_url(&self, app_id: &str) -> String {
+        self.url(&format!("{app_id}/subscriptions"))
+    }
+
     /// Reads the business profile (about, address, description, e-mail,
     /// websites, vertical).
     ///
@@ -1833,6 +1853,157 @@ impl<T: Transport> WhatsAppClient<T> {
         }
         self.subscribe_webhooks(waba_id, None).await?;
         Ok(SubscriptionState::Subscribed)
+    }
+
+    /// Lists the app-level webhook field subscriptions.
+    ///
+    /// This is the app-wide field selection, not the WABA attach step. Meta
+    /// returns one entry per subscribed object; the WhatsApp entry is available
+    /// through [`AppWebhookSubscriptions::whatsapp_business_account`].
+    ///
+    /// ```
+    /// # use meta_whatsapp::{Result, Transport, WhatsAppClient, transport::{Request, Response}};
+    /// # struct Mock;
+    /// # impl Transport for Mock {
+    /// #     async fn execute(&self, _: Request<'_>) -> Result<Response> {
+    /// #         Ok(Response::new(
+    /// #             200,
+    /// #             std::iter::empty(),
+    /// #             br#"{"data":[{"object":"whatsapp_business_account","fields":[{"name":"messages"}]}]}"#.to_vec(),
+    /// #         ))
+    /// #     }
+    /// # }
+    /// # async fn demo() -> Result<()> {
+    /// let subs = WhatsAppClient::new("1", "t", Mock)
+    ///     .app_webhook_subscriptions("1234567890")
+    ///     .await?;
+    /// assert!(subs.whatsapp_business_account().is_some());
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for a malformed app id; then transport and Graph
+    /// API errors. A body of the wrong shape is [`Error::Json`] with serde's
+    /// error retained as its source.
+    pub async fn app_webhook_subscriptions(&self, app_id: &str) -> Result<AppWebhookSubscriptions> {
+        validate_app_id(app_id)?;
+        let url = self.app_subscriptions_url(app_id);
+        let response = self.execute(Request::get(&url, &self.token)).await?;
+        AppWebhookSubscriptions::parse(&response.json()?)
+    }
+
+    /// Sets the app-level webhook callback and field subscription.
+    ///
+    /// Repeating the same request is safe: the POST is treated as idempotent,
+    /// so a transient 5xx is retried instead of surfacing as ambiguous.
+    ///
+    /// ```
+    /// # use meta_whatsapp::{Result, Transport, WhatsAppClient, transport::{Request, Response}};
+    /// # use meta_whatsapp::subscription::{AppWebhookSubscriptionRequest, SubscriptionField};
+    /// # struct Mock;
+    /// # impl Transport for Mock {
+    /// #     async fn execute(&self, request: Request<'_>) -> Result<Response> {
+    /// #         assert_eq!(request.method.as_str(), "POST");
+    /// #         assert_eq!(request.body_json().unwrap()["fields"], "messages");
+    /// #         Ok(Response::new(200, std::iter::empty(), br#"{"success":true}"#.to_vec()))
+    /// #     }
+    /// # }
+    /// # async fn demo() -> Result<()> {
+    /// let request = AppWebhookSubscriptionRequest::new(
+    ///     "https://example.test/hooks/whatsapp",
+    ///     "s3cret",
+    ///     [SubscriptionField::Messages],
+    /// );
+    /// let outcome = WhatsAppClient::new("1", "t", Mock)
+    ///     .subscribe_app_webhooks("1234567890", &request)
+    ///     .await?;
+    /// assert!(outcome.success);
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for a malformed app id or request; then transport,
+    /// Graph API and payload errors.
+    pub async fn subscribe_app_webhooks(
+        &self,
+        app_id: &str,
+        request: &AppWebhookSubscriptionRequest,
+    ) -> Result<SuccessOutcome> {
+        validate_app_id(app_id)?;
+        let payload = request.to_json()?;
+        let url = self.app_subscriptions_url(app_id);
+        let response = self
+            .execute_with(
+                Request::post_json(&url, &self.token, &payload),
+                Repeatability::Idempotent,
+            )
+            .await?;
+        SuccessOutcome::from_value(&response.json()?)
+    }
+
+    /// Makes sure the app-level webhook callback and field set are in place.
+    ///
+    /// The client reads the current app subscription first and writes only when
+    /// the callback URL, active state or exact field set differ. An unchanged
+    /// configuration returns [`AppSubscriptionState::AlreadySubscribed`] with no
+    /// POST. A missing WABA object returns
+    /// [`AppSubscriptionState::Subscribed`]; a different existing one returns
+    /// [`AppSubscriptionState::Updated`].
+    ///
+    /// ```
+    /// # use meta_whatsapp::{Result, Transport, WhatsAppClient, transport::{Request, Response}};
+    /// # use meta_whatsapp::subscription::{
+    /// #     AppSubscriptionState, AppWebhookSubscriptionRequest, SubscriptionField,
+    /// # };
+    /// # struct Mock;
+    /// # impl Transport for Mock {
+    /// #     async fn execute(&self, request: Request<'_>) -> Result<Response> {
+    /// #         match request.method.as_str() {
+    /// #             "GET" => Ok(Response::new(200, std::iter::empty(), br#"{"data":[]}"#.to_vec())),
+    /// #             _ => Ok(Response::new(200, std::iter::empty(), br#"{"success":true}"#.to_vec())),
+    /// #         }
+    /// #     }
+    /// # }
+    /// # async fn demo() -> Result<()> {
+    /// let request = AppWebhookSubscriptionRequest::new(
+    ///     "https://example.test/hooks/whatsapp",
+    ///     "s3cret",
+    ///     [SubscriptionField::Messages],
+    /// );
+    /// let state = WhatsAppClient::new("1", "t", Mock)
+    ///     .ensure_app_webhook_subscription("1234567890", &request)
+    ///     .await?;
+    /// assert_eq!(state, AppSubscriptionState::Subscribed);
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for a malformed app id or request; then transport,
+    /// Graph API and payload errors from the read or write.
+    pub async fn ensure_app_webhook_subscription(
+        &self,
+        app_id: &str,
+        request: &AppWebhookSubscriptionRequest,
+    ) -> Result<AppSubscriptionState> {
+        validate_app_id(app_id)?;
+        request.validate()?;
+        let current = self.app_webhook_subscriptions(app_id).await?;
+        if request.is_applied_to(&current) {
+            return Ok(AppSubscriptionState::AlreadySubscribed);
+        }
+        let state = if current.whatsapp_business_account().is_some() {
+            AppSubscriptionState::Updated
+        } else {
+            AppSubscriptionState::Subscribed
+        };
+        self.subscribe_app_webhooks(app_id, request).await?;
+        Ok(state)
     }
 
     /// Executes `request`, retrying only what it is safe to repeat.

@@ -142,7 +142,9 @@ pub use message::{
 pub use retry::{Action, Attempt, Repeatability, RetryPolicy};
 pub use status::{validate_wamid, DeliveryStatus, MessageStatus, MAX_WAMID_LEN};
 pub use subscription::{
-    SubscribedApp, SubscriptionConfig, SubscriptionState, WebhookSubscriptions,
+    validate_app_id, validate_waba_id, AppSubscriptionState, AppWebhookSubscription,
+    AppWebhookSubscriptionRequest, AppWebhookSubscriptions, SubscribedApp, SubscribedWebhookField,
+    SubscriptionConfig, SubscriptionField, SubscriptionState, WebhookSubscriptions,
 };
 pub use template::{
     Cursors, Paging, TemplateAck, TemplateButton, TemplateButtonType, TemplateCategory,

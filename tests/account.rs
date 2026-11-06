@@ -9,11 +9,14 @@
 
 mod common;
 
-use common::{client, json_response, response, MockTransport, Reply};
+use common::{client, instant_retry, json_response, response, MockTransport, Reply};
 use meta_whatsapp::business::{
     BlockUsersQuery, BusinessProfileUpdate, MessagingLimitTier, QualityRating,
 };
-use meta_whatsapp::subscription::{SubscriptionConfig, SubscriptionState};
+use meta_whatsapp::subscription::{
+    AppSubscriptionState, AppWebhookSubscriptionRequest, AppWebhookSubscriptions,
+    SubscriptionConfig, SubscriptionField, SubscriptionState,
+};
 use meta_whatsapp::{Error, WhatsAppClient};
 
 const WABA: &str = "102290129340398";
@@ -591,6 +594,345 @@ async fn an_empty_app_id_is_rejected() {
         }
     ));
     assert_eq!(transport.call_count(), 0);
+}
+
+#[tokio::test]
+async fn app_webhook_subscription_posts_the_exact_object_fields_body() {
+    let transport = MockTransport::new();
+    transport.push_response(json_response(&serde_json::json!({ "success": true })));
+    let request = AppWebhookSubscriptionRequest::new(
+        "https://example.test/hooks/whatsapp",
+        "s3cret",
+        [
+            SubscriptionField::Messages,
+            SubscriptionField::MessageTemplateStatusUpdate,
+            SubscriptionField::Messages,
+        ],
+    );
+
+    let outcome = client(transport.clone())
+        .subscribe_app_webhooks(APP, &request)
+        .await
+        .unwrap();
+
+    assert!(outcome.success);
+    let call = transport.only_call();
+    assert_eq!(call.method.as_str(), "POST");
+    assert_eq!(
+        call.url,
+        format!("https://graph.facebook.com/v21.0/{APP}/subscriptions")
+    );
+    assert_eq!(call.token, "EAAG-test-token");
+    assert_eq!(
+        call.body,
+        common::Body::Json(serde_json::json!({
+            "object": "whatsapp_business_account",
+            "callback_url": "https://example.test/hooks/whatsapp",
+            "verify_token": "s3cret",
+            "fields": "messages,message_template_status_update"
+        }))
+    );
+}
+
+#[tokio::test]
+async fn app_webhook_subscriptions_parse_both_documented_field_shapes() {
+    let transport = MockTransport::new();
+    transport.push_response(json_response(&serde_json::json!({
+        "data": [{
+            "object": "whatsapp_business_account",
+            "callback_url": "https://example.test/hooks/whatsapp",
+            "active": true,
+            "fields": [
+                {"name": "messages", "version": "v23.0"},
+                "message_template_status_update",
+                {"name": "future_field"}
+            ]
+        }]
+    })));
+
+    let subscriptions = client(transport.clone())
+        .app_webhook_subscriptions(APP)
+        .await
+        .unwrap();
+    let call = transport.only_call();
+    assert_eq!(call.method.as_str(), "GET");
+    assert_eq!(
+        call.url,
+        format!("https://graph.facebook.com/v21.0/{APP}/subscriptions")
+    );
+    assert_eq!(call.body, common::Body::Empty);
+
+    let current = subscriptions.whatsapp_business_account().unwrap();
+    assert_eq!(current.fields[0].name, SubscriptionField::Messages);
+    assert_eq!(current.fields[0].version.as_deref(), Some("v23.0"));
+    assert_eq!(
+        current.fields[1].name,
+        SubscriptionField::MessageTemplateStatusUpdate
+    );
+    assert_eq!(current.fields[1].version, None);
+    assert_eq!(
+        current.fields[2].name,
+        SubscriptionField::Unknown("future_field".into())
+    );
+}
+
+#[tokio::test]
+async fn ensure_app_subscription_reads_without_writing_an_identical_config() {
+    let request = AppWebhookSubscriptionRequest::new(
+        "https://example.test/hooks/whatsapp",
+        "s3cret",
+        [
+            SubscriptionField::MessageTemplateStatusUpdate,
+            SubscriptionField::Messages,
+        ],
+    );
+
+    for _ in 0..2 {
+        let transport = MockTransport::new();
+        transport.push_response(json_response(&serde_json::json!({
+            "data": [{
+                "object": "whatsapp_business_account",
+                "callback_url": "https://example.test/hooks/whatsapp",
+                "active": true,
+                "fields": [
+                    {"name": "messages"},
+                    {"name": "message_template_status_update"}
+                ]
+            }]
+        })));
+
+        let state = client(transport.clone())
+            .ensure_app_webhook_subscription(APP, &request)
+            .await
+            .unwrap();
+
+        assert_eq!(state, AppSubscriptionState::AlreadySubscribed);
+        assert!(!state.was_written());
+        assert_eq!(transport.call_count(), 1, "one GET and no POST");
+    }
+}
+
+#[tokio::test]
+async fn ensure_app_subscription_creates_or_updates_with_one_exact_post() {
+    let request = AppWebhookSubscriptionRequest::new(
+        "https://example.test/hooks/whatsapp",
+        "s3cret",
+        [SubscriptionField::Messages],
+    );
+
+    let fresh = MockTransport::new();
+    fresh.push_response(json_response(&serde_json::json!({ "data": [] })));
+    fresh.push_response(json_response(&serde_json::json!({ "success": true })));
+    let fresh_state = client(fresh.clone())
+        .ensure_app_webhook_subscription(APP, &request)
+        .await
+        .unwrap();
+    assert_eq!(fresh_state, AppSubscriptionState::Subscribed);
+    assert!(fresh_state.was_written());
+    assert_eq!(fresh.calls().len(), 2);
+    assert_eq!(fresh.calls()[0].method.as_str(), "GET");
+    assert_eq!(fresh.calls()[1].method.as_str(), "POST");
+
+    let changed = MockTransport::new();
+    changed.push_response(json_response(&serde_json::json!({
+        "data": [{
+            "object": "whatsapp_business_account",
+            "callback_url": "https://old.example.test/hooks",
+            "active": true,
+            "fields": [{"name": "phone_number_quality_update"}]
+        }]
+    })));
+    changed.push_response(json_response(&serde_json::json!({ "success": true })));
+    let changed_state = client(changed.clone())
+        .ensure_app_webhook_subscription(APP, &request)
+        .await
+        .unwrap();
+    assert_eq!(changed_state, AppSubscriptionState::Updated);
+    assert!(changed_state.was_written());
+    assert_eq!(changed.calls().len(), 2);
+    assert_eq!(changed.calls()[1].method.as_str(), "POST");
+    assert_eq!(
+        changed.calls()[1].body,
+        common::Body::Json(serde_json::json!({
+            "object": "whatsapp_business_account",
+            "callback_url": "https://example.test/hooks/whatsapp",
+            "verify_token": "s3cret",
+            "fields": "messages"
+        }))
+    );
+}
+
+#[tokio::test]
+async fn app_subscription_ids_are_digits_only_at_the_documented_boundary() {
+    let transport = MockTransport::new();
+    let api = client(transport.clone());
+    let request = AppWebhookSubscriptionRequest::new(
+        "https://example.test/hooks/whatsapp",
+        "s3cret",
+        [SubscriptionField::Messages],
+    );
+
+    for app_id in ["", "../me", "123a", &"1".repeat(33)] {
+        for error in [
+            api.app_webhook_subscriptions(app_id).await.unwrap_err(),
+            api.subscribe_app_webhooks(app_id, &request)
+                .await
+                .unwrap_err(),
+            api.ensure_app_webhook_subscription(app_id, &request)
+                .await
+                .unwrap_err(),
+        ] {
+            assert!(matches!(
+                error,
+                Error::Validation {
+                    field: "app_id",
+                    ..
+                }
+            ));
+        }
+    }
+    assert_eq!(transport.call_count(), 0);
+
+    let boundary = MockTransport::new();
+    boundary.push_response(json_response(&serde_json::json!({ "data": [] })));
+    client(boundary.clone())
+        .app_webhook_subscriptions(&"1".repeat(32))
+        .await
+        .unwrap();
+    assert_eq!(boundary.call_count(), 1);
+}
+
+#[tokio::test]
+async fn app_subscription_request_validation_has_a_boundary_pair_per_limit() {
+    let url_at_limit = format!("https://a.test/{}", "x".repeat(1024 - 15));
+    let url_over_limit = format!("https://a.test/{}", "x".repeat(1025 - 15));
+    assert_eq!(url_at_limit.chars().count(), 1024);
+    assert_eq!(url_over_limit.chars().count(), 1025);
+
+    let valid = AppWebhookSubscriptionRequest::new(
+        &url_at_limit,
+        "x".repeat(256),
+        [SubscriptionField::Messages],
+    );
+    assert!(valid.validate().is_ok());
+    assert!(AppWebhookSubscriptionRequest::new(
+        &url_over_limit,
+        "x".repeat(256),
+        [SubscriptionField::Messages]
+    )
+    .validate()
+    .is_err());
+    assert!(AppWebhookSubscriptionRequest::new(
+        "https://a.test/hook",
+        "x".repeat(257),
+        [SubscriptionField::Messages]
+    )
+    .validate()
+    .is_err());
+    assert!(
+        AppWebhookSubscriptionRequest::new("https://a.test/hook", "token", [])
+            .validate()
+            .is_err()
+    );
+    assert!(AppWebhookSubscriptionRequest::new(
+        "http://a.test/hook",
+        "token",
+        [SubscriptionField::Messages]
+    )
+    .validate()
+    .is_err());
+    assert!(AppWebhookSubscriptionRequest::new(
+        "https:///hook",
+        "token",
+        [SubscriptionField::Messages]
+    )
+    .validate()
+    .is_err());
+    assert!(AppWebhookSubscriptionRequest::new(
+        "https://a.test/a b",
+        "token",
+        [SubscriptionField::Messages]
+    )
+    .validate()
+    .is_err());
+    assert!(AppWebhookSubscriptionRequest::new(
+        "https://a.test/hook",
+        "bad\ntoken",
+        [SubscriptionField::Messages]
+    )
+    .validate()
+    .is_err());
+    for field in [
+        SubscriptionField::Unknown(String::new()),
+        SubscriptionField::Unknown("bad field".into()),
+        SubscriptionField::Unknown("bad,field".into()),
+        SubscriptionField::Unknown("bad\u{7}field".into()),
+    ] {
+        assert!(
+            AppWebhookSubscriptionRequest::new("https://a.test/hook", "token", [field])
+                .validate()
+                .is_err()
+        );
+    }
+}
+
+#[tokio::test]
+async fn malformed_app_subscription_read_retains_the_serde_source() {
+    let transport = MockTransport::new();
+    transport.push_response(json_response(&serde_json::json!({
+        "data": "not an array"
+    })));
+
+    let error = client(transport.clone())
+        .app_webhook_subscriptions(APP)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, Error::Json { .. }), "{error:?}");
+    assert!(std::error::Error::source(&error).is_some());
+    assert_eq!(transport.call_count(), 1);
+}
+
+#[tokio::test]
+async fn app_subscription_post_retries_a_5xx_because_it_is_idempotent() {
+    let transport = MockTransport::new();
+    transport.push_response(response(
+        503,
+        &[],
+        br#"{"error":{"code":2,"message":"temporarily unavailable"}}"#,
+    ));
+    transport.push_response(json_response(&serde_json::json!({ "success": true })));
+    let request = AppWebhookSubscriptionRequest::new(
+        "https://example.test/hooks/whatsapp",
+        "s3cret",
+        [SubscriptionField::Messages],
+    );
+
+    let outcome = client(transport.clone())
+        .with_retry(instant_retry(2))
+        .subscribe_app_webhooks(APP, &request)
+        .await
+        .unwrap();
+
+    assert!(outcome.success);
+    assert_eq!(transport.call_count(), 2);
+    assert!(transport
+        .calls()
+        .iter()
+        .all(|call| call.method.as_str() == "POST"));
+}
+
+#[tokio::test]
+async fn app_subscription_parse_helpers_cover_empty_and_unknown_objects() {
+    let empty = AppWebhookSubscriptions::parse(&serde_json::json!({})).unwrap();
+    assert!(empty.whatsapp_business_account().is_none());
+
+    let subscriptions = AppWebhookSubscriptions::parse(&serde_json::json!({
+        "data": [{"object": "page", "fields": []}]
+    }))
+    .unwrap();
+    assert!(subscriptions.whatsapp_business_account().is_none());
+    assert_eq!(subscriptions.data[0].object, "page");
 }
 
 #[tokio::test]

@@ -59,6 +59,8 @@ Secondary sources — the developer reference pages the spec links to:
 | `webhook_subscriptions` | `GET /{waba-id}/subscribed_apps` | `/{Version}/{WABA-ID}/subscribed_apps` |
 | `subscribe_webhooks` | `POST /{waba-id}/subscribed_apps` | same |
 | `unsubscribe_webhooks` | `DELETE /{waba-id}/subscribed_apps` | same |
+| `app_webhook_subscriptions` | `GET /{app-id}/subscriptions` | `/{Version}/{App-ID}/subscriptions` |
+| `subscribe_app_webhooks` | `POST /{app-id}/subscriptions` | same; body has `object`, `callback_url`, `verify_token`, comma-separated `fields` |
 
 ## Shapes and their sources
 
@@ -70,6 +72,8 @@ Secondary sources — the developer reference pages the spec links to:
 | `MessagingLimitTier` | `WhatsAppAccountNumber.messaging_limit_tier` | TIER_50, TIER_250, TIER_1K, TIER_10K, TIER_100K, TIER_UNLIMITED. |
 | `BlockedUser` / `BlockedUsersPage` | `GetBlockedUsersData`, `BlockedUser` | `data[]` plus `paging`. |
 | `BlockUsersQuery` | paging is described in the block-users guide, not typed in the OpenAPI file | `limit` (≥ 1; no documented maximum) plus the opaque `after` cursor from `paging.cursors.after`, rendered as `limit=…&after=…`. |
+| `SubscriptionField` / `AppWebhookSubscriptionRequest` | app-level subscriptions guide | `SubscriptionField` covers `messages`, `message_template_status_update`, `phone_number_quality_update`, plus unknown names. Callback URL ≤ 1024 characters, verify token ≤ 256, and at least one field. |
+| `AppWebhookSubscriptions` / `AppWebhookSubscription` | app-level subscriptions guide | `data[]` entries identify an `object`; WhatsApp entries carry the callback, active state and field list. Fields parse from either bare strings or `{name, version}` objects. Serde errors are retained as `Error::Json { source }`. |
 | `BlockOutcome` | `BlockUsersData` (`added_users`), `UnblockUsersData` (`removed_users`), `BlockedUserOperation` | Same payload shape for POST and DELETE; ids travel in the body. |
 | `SuccessOutcome` | register / deregister / two-step responses (`success`) | `success` is documented as a boolean; missing, `1`/`0` and `"true"`/`"1"` also decode — see *unverified*, README. Unknown fields land in `extra`. |
 | `VerificationPin` | two-step verification reference | exactly 6 ASCII digits, checked before allocation. `Debug`/`Display` are fixed redacted text; no getter, no `Default`, equality is constant time. |
@@ -134,9 +138,11 @@ Secondary sources — the developer reference pages the spec links to:
   verbatim in the item's `extra` and the field stays empty, so an unreadable
   price never turns into a zero. Unknown keys survive in the matching `extra`
   map, including through a render/parse round trip.
-* **No field-level webhook subscription.** The WABA node has no
-  `subscribed_fields`; that parameter belongs to the app-level
-  `/{app_id}/subscriptions` endpoint, which is out of scope (README).
+* **App-level field selection is separate from WABA attachment.** The WABA node
+  has no `subscribed_fields`; that parameter belongs to the app-level
+  `/{app_id}/subscriptions` endpoint implemented by `app_webhook_subscriptions`
+  and `subscribe_app_webhooks`. The WABA-level calls still attach or detach the
+  app itself.
 * **The address family is reference-only.** `address_message` does not appear in
   the v23.0 OpenAPI description at all — it is modelled from the reference
   page's field table and examples. That page scopes the feature to India and
