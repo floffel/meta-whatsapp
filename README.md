@@ -362,9 +362,15 @@ with a token the API just rejected.
   waiting less than the server asked for only earns a second 429 and burns an
   attempt. `max_delay` therefore decides *whether* to retry, not how long;
   `without_retry_after()` ignores the header and lets the curve decide.
-* Per-request timeout via `WhatsAppClient::with_timeout`; waits use
-  `tokio::time::sleep` (cancellation safe). Without the `http` feature there is
-  no timer to await, so retries happen immediately — bring your own pacing.
+* `ReqwestTransport` gives every call a total deadline of
+  `DEFAULT_REQUEST_TIMEOUT` (60 s) and a connect deadline of
+  `DEFAULT_CONNECT_TIMEOUT` (10 s). Override them for a transport with
+  `with_request_timeout` / `with_connect_timeout`, or override the total
+  deadline for one call with `Request::with_timeout`; the per-request value wins.
+  A timeout after the request was written is `TransportPhase::AfterWrite`, so a
+  POST is never re-sent automatically. Waits use `tokio::time::sleep`
+  (cancellation safe). Without the `http` feature there is no timer to await,
+  so retries happen immediately — bring your own pacing.
 * `ReqwestTransport` classifies `reqwest` failures by phase: `is_connect()` is
   "before the write" (retryable), a timeout or body/decode error is "after the
   write" (ambiguous for a send), and anything else is terminal.
@@ -507,7 +513,8 @@ The suite has five layers:
   counts the inbound parser must refuse to read, and that no unpublished
   ceiling (item count, order text) is invented;
   `tests/reqwest_transport.rs` drives the bundled transport against a local
-  socket and a refused connection.
+  socket, a refused connection and a silent peer, with paused time pinning both
+  the default and per-request deadlines.
 * **Property** (`proptest`) — webhook parsing never panics over arbitrary JSON,
   sign/verify round-trips for arbitrary secrets and bodies, text acceptance
   matches the documented boundary, backoff stays bounded, queries stay

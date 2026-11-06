@@ -494,11 +494,16 @@ pub trait Transport {
 
 /// `reqwest`-based transport, enabled by default via the `http` feature.
 ///
-/// The client is cheap to clone and safe to share across tasks. Response bodies
-/// are buffered only up to [`DEFAULT_MAX_RESPONSE_BYTES`], and the ceiling is
-/// enforced while the body streams, so a misbehaving endpoint cannot make the
-/// process allocate without bound; use
-/// [`ReqwestTransport::with_max_response_bytes`] to tighten it per client.
+/// The client is cheap to clone and safe to share across tasks. Every call has
+/// a total deadline of [`DEFAULT_REQUEST_TIMEOUT`] and a connect deadline of
+/// [`DEFAULT_CONNECT_TIMEOUT`]; override them with
+/// [`ReqwestTransport::with_request_timeout`] and
+/// [`ReqwestTransport::with_connect_timeout`], or override the total deadline
+/// for one call with [`Request::with_timeout`]. Response bodies are buffered
+/// only up to [`DEFAULT_MAX_RESPONSE_BYTES`], and the ceiling is enforced while
+/// the body streams, so a misbehaving endpoint cannot make the process allocate
+/// without bound; use [`ReqwestTransport::with_max_response_bytes`] to tighten
+/// it per client.
 ///
 /// ```no_run
 /// # #[cfg(feature = "http")]
@@ -514,8 +519,47 @@ pub trait Transport {
 #[derive(Debug, Clone)]
 pub struct ReqwestTransport {
     client: reqwest::Client,
+    request_timeout: Duration,
+    connect_timeout: Duration,
     max_response_bytes: usize,
 }
+
+/// Default total deadline for one HTTP request: 60 seconds.
+///
+/// This covers connecting, writing the request, and reading the complete
+/// response. It exists so a peer that accepts a connection and then goes
+/// silent cannot park the caller forever. Override it for one call with
+/// [`Request::with_timeout`] or for every call on a transport with
+/// [`ReqwestTransport::with_request_timeout`].
+///
+/// ```rust
+/// # #[cfg(feature = "http")]
+/// # {
+/// use std::time::Duration;
+/// use meta_whatsapp::transport::DEFAULT_REQUEST_TIMEOUT;
+///
+/// assert_eq!(DEFAULT_REQUEST_TIMEOUT, Duration::from_secs(60));
+/// # }
+/// ```
+#[cfg(feature = "http")]
+pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Default deadline for establishing a connection: 10 seconds.
+///
+/// This bounds DNS, TCP connect, and the TLS handshake. Override it for every
+/// call on a transport with [`ReqwestTransport::with_connect_timeout`].
+///
+/// ```rust
+/// # #[cfg(feature = "http")]
+/// # {
+/// use std::time::Duration;
+/// use meta_whatsapp::transport::DEFAULT_CONNECT_TIMEOUT;
+///
+/// assert_eq!(DEFAULT_CONNECT_TIMEOUT, Duration::from_secs(10));
+/// # }
+/// ```
+#[cfg(feature = "http")]
+pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Default ceiling for a buffered response body: 100 MiB.
 ///
@@ -541,7 +585,9 @@ pub const DEFAULT_MAX_RESPONSE_BYTES: usize = 100 * 1024 * 1024;
 impl Default for ReqwestTransport {
     fn default() -> Self {
         Self {
-            client: reqwest::Client::default(),
+            client: build_client(DEFAULT_REQUEST_TIMEOUT, DEFAULT_CONNECT_TIMEOUT),
+            request_timeout: DEFAULT_REQUEST_TIMEOUT,
+            connect_timeout: DEFAULT_CONNECT_TIMEOUT,
             max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES,
         }
     }
@@ -549,8 +595,8 @@ impl Default for ReqwestTransport {
 
 #[cfg(feature = "http")]
 impl ReqwestTransport {
-    /// Creates a transport with a default client (rustls, redirects followed)
-    /// and the default [`DEFAULT_MAX_RESPONSE_BYTES`] ceiling.
+    /// Creates a transport with rustls, the default request and connect
+    /// deadlines, and the default [`DEFAULT_MAX_RESPONSE_BYTES`] ceiling.
     ///
     /// ```rust
     /// # #[cfg(feature = "http")]
@@ -565,6 +611,83 @@ impl ReqwestTransport {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Overrides the total deadline for every request this transport sends.
+    ///
+    /// A per-request [`Request::with_timeout`] still takes precedence for that
+    /// call. The deadline covers connecting, writing, and reading the complete
+    /// response; a timeout after the request was written is reported as
+    /// [`TransportPhase::AfterWrite`] and is not retried for a POST.
+    ///
+    /// ```rust
+    /// # #[cfg(feature = "http")]
+    /// # {
+    /// use std::time::Duration;
+    /// use meta_whatsapp::ReqwestTransport;
+    ///
+    /// let transport = ReqwestTransport::new().with_request_timeout(Duration::from_secs(20));
+    /// assert_eq!(transport.request_timeout(), Duration::from_secs(20));
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn with_request_timeout(mut self, timeout: Duration) -> Self {
+        self.request_timeout = timeout;
+        self.client = build_client(self.request_timeout, self.connect_timeout);
+        self
+    }
+
+    /// Overrides the connection-establishment deadline for every request.
+    ///
+    /// This bounds DNS, TCP connect, and the TLS handshake. A connect timeout
+    /// happens before any request bytes are written, so it is retryable even
+    /// for a POST.
+    ///
+    /// ```rust
+    /// # #[cfg(feature = "http")]
+    /// # {
+    /// use std::time::Duration;
+    /// use meta_whatsapp::ReqwestTransport;
+    ///
+    /// let transport = ReqwestTransport::new().with_connect_timeout(Duration::from_secs(5));
+    /// assert_eq!(transport.connect_timeout(), Duration::from_secs(5));
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn with_connect_timeout(mut self, timeout: Duration) -> Self {
+        self.connect_timeout = timeout;
+        self.client = build_client(self.request_timeout, self.connect_timeout);
+        self
+    }
+
+    /// The total deadline applied when a request does not override it.
+    ///
+    /// ```rust
+    /// # #[cfg(feature = "http")]
+    /// # {
+    /// use meta_whatsapp::{transport::DEFAULT_REQUEST_TIMEOUT, ReqwestTransport};
+    ///
+    /// assert_eq!(ReqwestTransport::new().request_timeout(), DEFAULT_REQUEST_TIMEOUT);
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn request_timeout(&self) -> Duration {
+        self.request_timeout
+    }
+
+    /// The connection-establishment deadline applied to every request.
+    ///
+    /// ```rust
+    /// # #[cfg(feature = "http")]
+    /// # {
+    /// use meta_whatsapp::{transport::DEFAULT_CONNECT_TIMEOUT, ReqwestTransport};
+    ///
+    /// assert_eq!(ReqwestTransport::new().connect_timeout(), DEFAULT_CONNECT_TIMEOUT);
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn connect_timeout(&self) -> Duration {
+        self.connect_timeout
     }
 
     /// Sets the largest response body the transport will buffer, in bytes.
@@ -613,6 +736,21 @@ impl ReqwestTransport {
     pub fn max_response_bytes(&self) -> usize {
         self.max_response_bytes
     }
+}
+
+/// Builds a client whose deadlines are explicit rather than reqwest's
+/// no-timeout default.
+///
+/// The bundled constructor is infallible, like `reqwest::Client::new`; a TLS
+/// backend or resolver that cannot initialize is a process configuration
+/// failure, not a per-request error.
+#[cfg(feature = "http")]
+fn build_client(request_timeout: Duration, connect_timeout: Duration) -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(request_timeout)
+        .connect_timeout(connect_timeout)
+        .build()
+        .expect("the reqwest client with protocol deadlines must build")
 }
 
 #[cfg(feature = "http")]

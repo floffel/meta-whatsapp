@@ -13,11 +13,16 @@
 
 #![cfg(feature = "http")]
 
+use std::future::pending;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use meta_whatsapp::error::TransportPhase;
-use meta_whatsapp::transport::{Request, Transport};
-use meta_whatsapp::{Error, ReqwestTransport, WhatsAppClient};
+use meta_whatsapp::transport::{
+    Request, Transport, DEFAULT_CONNECT_TIMEOUT, DEFAULT_REQUEST_TIMEOUT,
+};
+use meta_whatsapp::{Error, ReqwestTransport, RetryPolicy, WhatsAppClient};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
@@ -58,11 +63,171 @@ async fn serve_bytes(response: Vec<u8>) -> String {
     format!("http://{address}")
 }
 
+/// Accepts each request and reads its head, then keeps the socket open without
+/// answering. Returns the base URL and the number of accepted connections.
+async fn serve_silently() -> (String, Arc<AtomicUsize>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let accepted = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&accepted);
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            counter.fetch_add(1, Ordering::SeqCst);
+            tokio::spawn(async move {
+                let mut head = Vec::new();
+                let mut buffer = [0_u8; 512];
+                loop {
+                    match socket.read(&mut buffer).await {
+                        Ok(0) | Err(_) => return,
+                        Ok(read) => {
+                            head.extend_from_slice(&buffer[..read]);
+                            if head.windows(4).any(|window| window == b"\r\n\r\n") {
+                                break;
+                            }
+                        }
+                    }
+                }
+                pending::<()>().await;
+            });
+        }
+    });
+    (format!("http://{address}"), accepted)
+}
+
+/// Yields until the server has accepted at least `expected` connections.
+///
+/// The runtime's clock is paused in the deadline tests, so the server task may
+/// not have reached `accept` when the client starts. Waiting here keeps the
+/// tests independent of task scheduling order without sleeping in wall time.
+async fn wait_for_accepts(accepted: &AtomicUsize, expected: usize) {
+    for _ in 0..1_000 {
+        if accepted.load(Ordering::SeqCst) >= expected {
+            return;
+        }
+        tokio::task::yield_now().await;
+    }
+    panic!(
+        "the silent server accepted {} connections, expected at least {expected}",
+        accepted.load(Ordering::SeqCst)
+    );
+}
+
 /// Glues a response head (status line plus headers) to a body.
 fn with_body(head: &str, body: &[u8]) -> Vec<u8> {
     let mut response = head.as_bytes().to_vec();
     response.extend_from_slice(body);
     response
+}
+
+#[test]
+fn the_default_deadlines_are_named_and_overridable() {
+    assert_eq!(DEFAULT_REQUEST_TIMEOUT, Duration::from_secs(60));
+    assert_eq!(DEFAULT_CONNECT_TIMEOUT, Duration::from_secs(10));
+
+    let transport = ReqwestTransport::new();
+    assert_eq!(transport.request_timeout(), DEFAULT_REQUEST_TIMEOUT);
+    assert_eq!(transport.connect_timeout(), DEFAULT_CONNECT_TIMEOUT);
+
+    let tightened = transport
+        .with_request_timeout(Duration::from_secs(20))
+        .with_connect_timeout(Duration::from_secs(5));
+    assert_eq!(tightened.request_timeout(), Duration::from_secs(20));
+    assert_eq!(tightened.connect_timeout(), Duration::from_secs(5));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_silent_peer_hits_the_transport_request_deadline() {
+    let (base, _accepted) = serve_silently().await;
+    let transport = ReqwestTransport::new()
+        .with_request_timeout(Duration::from_secs(3))
+        .with_connect_timeout(Duration::from_secs(20));
+    let body = serde_json::json!({"messaging_product": "whatsapp"});
+    let started = tokio::time::Instant::now();
+
+    let error = transport
+        .execute(Request::post_json(
+            &format!("{base}/messages"),
+            "EAAG-test",
+            &body,
+        ))
+        .await
+        .unwrap_err();
+
+    assert_eq!(started.elapsed(), Duration::from_secs(3));
+    assert_eq!(
+        error.transport_phase(),
+        Some(TransportPhase::AfterWrite),
+        "the request was written before the deadline: {error:?}"
+    );
+    assert!(error.is_ambiguous());
+    assert!(!error.is_retryable());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_silent_peer_hits_the_default_transport_deadline() {
+    let (base, _accepted) = serve_silently().await;
+    let transport = ReqwestTransport::new().with_connect_timeout(Duration::from_secs(120));
+    let started = tokio::time::Instant::now();
+
+    let error = transport
+        .execute(Request::get(&format!("{base}/messages"), "EAAG-test"))
+        .await
+        .unwrap_err();
+
+    assert_eq!(started.elapsed(), DEFAULT_REQUEST_TIMEOUT);
+    assert_eq!(error.transport_phase(), Some(TransportPhase::AfterWrite));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_request_timeout_overrides_the_transport_request_deadline() {
+    let (base, _accepted) = serve_silently().await;
+    let transport = ReqwestTransport::new().with_request_timeout(Duration::from_secs(60));
+    let body = serde_json::json!({"messaging_product": "whatsapp"});
+    let started = tokio::time::Instant::now();
+
+    let error = transport
+        .execute(
+            Request::post_json(&format!("{base}/messages"), "EAAG-test", &body)
+                .with_timeout(Some(Duration::from_secs(2))),
+        )
+        .await
+        .unwrap_err();
+
+    assert_eq!(
+        started.elapsed(),
+        Duration::from_secs(2),
+        "the per-request deadline wins over the transport default"
+    );
+    assert_eq!(error.transport_phase(), Some(TransportPhase::AfterWrite));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_timed_out_send_is_ambiguous_and_not_re_sent() {
+    let (base, accepted) = serve_silently().await;
+    let transport = ReqwestTransport::new().with_request_timeout(Duration::from_secs(1));
+    let client = WhatsAppClient::new("106540352242922", "EAAG-test", transport)
+        .with_base_url(&base)
+        .with_retry(
+            RetryPolicy::new(5)
+                .with_base_delay(Duration::ZERO)
+                .with_max_delay(Duration::ZERO),
+        );
+
+    let task = tokio::spawn(async move { client.send_text("4915112345678", "hello").await });
+    wait_for_accepts(&accepted, 1).await;
+    tokio::time::advance(Duration::from_secs(1)).await;
+    let error = task.await.unwrap().unwrap_err();
+
+    assert!(error.is_ambiguous(), "{error:?}");
+    assert!(!error.is_retryable());
+    assert_eq!(
+        accepted.load(Ordering::SeqCst),
+        1,
+        "a non-idempotent request is never replayed after a timeout"
+    );
 }
 
 #[tokio::test]
